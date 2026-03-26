@@ -14,12 +14,15 @@ export default async function handler(req, res) {
   if (!query) return res.status(400).json({ error: "Missing query" });
 
   const KEY = process.env.SERPER_API_KEY || serperKey;
-  if (!KEY) return res.status(500).json({ error: "SERPER_API_KEY mancante — aggiungila su Vercel Settings > Env Vars oppure inseriscila nelle impostazioni app" });
+  if (!KEY || KEY.trim() === "") {
+    return res.status(500).json({ error: "Serper key mancante — inseriscila in Configura API nell'app oppure aggiungi SERPER_API_KEY su Vercel Settings > Env Vars" });
+  }
+  const cleanKey = KEY.trim();
 
   try {
     const r = await fetch("https://google.serper.dev/maps", {
       method: "POST",
-      headers: { "X-API-KEY": KEY, "Content-Type": "application/json" },
+      headers: { "X-API-KEY": cleanKey, "Content-Type": "application/json" },
       body: JSON.stringify({ q: query, gl: "it", hl: "it", num: 20 }),
     });
     const data = await r.json();

@@ -380,29 +380,10 @@ async function searchIdealista(dest, req) {
 }
 
 async function searchImmobiliare(dest, keys) {
-  var runId = await apifyRun("azzouzana~immobiliare-it-listing-page-scraper-by-search-url",{
-    startUrl: "https://www.immobiliare.it/affitto-case/?cerca[dove]=" + encodeURIComponent(dest),
-    maxItems: 20,
-  }, keys.apify);
-  var dsId  = await apifyWait(runId, keys.apify);
-  var items = await apifyItems(dsId, keys.apify, 20);
-  return items.filter(function(i){return i.title||i.name;}).map(function(item) {
-    var isPrivate = !item.agency && !item.realEstateAgency;
-    return {
-      platform:  "immobiliare",
-      name:      item.title||item.name||"Annuncio",
-      type:      item.typology||"Appartamento",
-      location:  item.location||item.city||dest,
-      price:     item.price ? item.price+"€/mese" : "",
-      phone:     item.phone||item.contactPhone||null,
-      email:     item.email||null,
-      website:   null,
-      is_private:    isPrivate,
-      owner_managed: isPrivate,
-      no_agency:     isPrivate,
-      src:       item.url||"https://www.immobiliare.it",
-    };
-  });
+  // Scraping diretto — no actor a pagamento
+  var slug = normKey(dest).replace(/_/g,"-");
+  var url = "https://www.immobiliare.it/affitto-case/" + slug + "/?localiMinimo=1";
+  return fetchScrape(url, "immobiliare");
 }
 
 // ─── RUN SEARCH ───────────────────────────────────────────────────────────────
@@ -985,8 +966,23 @@ export default function App() {
   var inpRef = useRef(null);
 
   useEffect(function() {
+    // Load keys — try new key first, fallback to old key names for migration
     storage.get("luxy:keys").then(function(r) {
-      if (r&&r.value) { try { setApiKeys(JSON.parse(r.value)); } catch(e){} }
+      if (r&&r.value) {
+        try { setApiKeys(JSON.parse(r.value)); return; } catch(e){}
+      }
+      // Migration: try old storage key names
+      return storage.get("luxy:api_keys").then(function(r2) {
+        if (r2&&r2.value) {
+          try {
+            var old = JSON.parse(r2.value);
+            // old format had: apify, rapid, google — map to new format
+            var migrated = { apify: old.apify||"", serper: old.serper||"" };
+            setApiKeys(migrated);
+            storage.set("luxy:keys", JSON.stringify(migrated)).catch(function(){});
+          } catch(e){}
+        }
+      });
     }).catch(function(){});
     storage.get("luxy:leads").then(function(r) {
       if (r&&r.value) { try { setAllLeads(JSON.parse(r.value)); } catch(e){} }

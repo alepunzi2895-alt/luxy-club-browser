@@ -24,12 +24,26 @@ export default async function handler(req, res) {
   }
 
   try {
+    // Pick referer based on platform
+    const referers = {
+      mediavacanze: "https://www.google.it/",
+      subito:       "https://www.google.it/",
+      idealista:    "https://www.idealista.it/",
+      immobiliare:  "https://www.immobiliare.it/",
+      telegram:     "https://t.me/",
+    };
     const r = await fetch(url, {
       headers: {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "it-IT,it;q=0.9,en;q=0.8",
-        "Cache-Control": "no-cache",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Cache-Control": "max-age=0",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Upgrade-Insecure-Requests": "1",
+        "Referer": referers[platform] || "https://www.google.it/",
       },
       redirect: "follow",
     });
@@ -61,6 +75,7 @@ function parseHtml(html, platform, baseUrl) {
   if (platform === "subito")       return parseSubito(html, baseUrl);
   if (platform === "idealista")    return parseIdealista(html, baseUrl);
   if (platform === "telegram")     return parseTelegram(html, baseUrl);
+  if (platform === "immobiliare")  return parseImmobiliare(html, baseUrl);
   return [];
 }
 
@@ -242,4 +257,56 @@ function parseTelegram(html, channelUrl) {
     if (results.length >= 15) break;
   }
   return results;
+}
+
+function parseImmobiliare(html, baseUrl) {
+  const results = [];
+
+  // Try JSON-LD / __NEXT_DATA__
+  const nextM = html.match(/<script[^>]*id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+  if (nextM) {
+    try {
+      const data = JSON.parse(nextM[1]);
+      const props = data.props && data.props.pageProps;
+      const items = (props && (props.results || props.listings || props.ads)) || [];
+      items.slice(0, 20).forEach(function(item) {
+        const isPrivate = !item.advertiser || item.advertiser.type === "private";
+        const ct = extractContacts(JSON.stringify(item));
+        results.push({
+          platform: "immobiliare",
+          name:     (item.title || item.description || "Annuncio Immobiliare.it").slice(0, 60),
+          type:     item.category || "Appartamento",
+          location: (item.location && item.location.city) || baseUrl,
+          price:    item.price ? item.price + "€/mese" : "",
+          phone:    (item.advertiser && item.advertiser.phones && item.advertiser.phones[0]) || ct.phone || null,
+          email:    ct.email,
+          is_private:    isPrivate,
+          owner_managed: isPrivate,
+          no_agency:     isPrivate,
+          src: item.url || baseUrl,
+        });
+      });
+    } catch(e) {}
+  }
+
+  // Fallback: regex on page
+  if (results.length === 0) {
+    const priceMs = html.match(/(\d[\d.]+)\s*€(?:\s*\/\s*(?:mese|month))/gi) || [];
+    const titleMs = html.match(/class="[^"]*in-listingCardTitle[^"]*"[^>]*>([^<]{5,80})</g) || [];
+    titleMs.slice(0, 15).forEach(function(tm, i) {
+      const name = tm.replace(/^[^>]+>/, "").trim();
+      if (name) {
+        results.push({
+          platform: "immobiliare",
+          name: name,
+          type: "Appartamento",
+          price: priceMs[i] || "",
+          is_private: false,
+          src: baseUrl,
+        });
+      }
+    });
+  }
+
+  return results.slice(0, 20);
 }
