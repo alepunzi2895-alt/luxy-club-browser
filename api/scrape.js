@@ -5,10 +5,12 @@
  */
 
 const ALLOWED_DOMAINS = [
-  "mediavacanze.com", "subito.it",
+  "mediavacanze.com", "subito.it", "hades.subito.it",
   "idealista.com", "idealista.it",
   "t.me", "immobiliare.it",
-  "fotocasa.es", "spitogatos.gr"
+  "fotocasa.es", "spitogatos.gr",
+  "casevacanza.it", "holidu.it",
+  "habitaclia.com", "api.fotocasa.es",
 ];
 
 export default async function handler(req, res) {
@@ -105,8 +107,13 @@ function extractContacts(text) {
 function parseHtml(html, platform, baseUrl) {
   if (platform === "contact")      return parseContactPage(html, baseUrl);
   if (platform === "mediavacanze") return parseMediaVacanze(html, baseUrl);
+  if (platform === "casevacanza")  return parseCasevacanza(html, baseUrl);
+  if (platform === "holidu")       return parseHolidu(html, baseUrl);
   if (platform === "subito")       return parseSubito(html, baseUrl);
+  if (platform === "subito_json")  return parseSubitoJson(html, baseUrl);
   if (platform === "idealista")    return parseIdealista(html, baseUrl);
+  if (platform === "habitaclia")   return parseHabitaclia(html, baseUrl);
+  if (platform === "fotocasa_api") return parseFotocasaApi(html, baseUrl);
   if (platform === "telegram")     return parseTelegram(html, baseUrl);
   if (platform === "immobiliare")  return parseImmobiliare(html, baseUrl);
   if (platform === "fotocasa")     return parseFotocasa(html, baseUrl);
@@ -518,4 +525,154 @@ function parseContactPage(html, baseUrl) {
   const ct = extractContacts(text);
   // Return raw html for the agent to parse
   return [{ platform:"contact", name: baseUrl, html: text.slice(0, 2000), ...ct }];
+}
+
+function parseSubitoJson(json, baseUrl) {
+  // Subito JSON API response
+  try {
+    const data = JSON.parse(json);
+    const items = (data.ads || data.items || data.results || []);
+    return items.slice(0, 20).map(function(item) {
+      const ct = extractContacts(JSON.stringify(item));
+      return {
+        platform: "subito",
+        name: item.subject || item.title || item.headline || "Annuncio Subito",
+        type: item.category && item.category.friendly_name || "Affitto vacanze",
+        location: item.geo && (item.geo.city && item.geo.city.value || item.geo.region && item.geo.region.value) || "",
+        price: item.features && item.features.find && (function(){ var p = item.features.find(function(f){return f["-id"]==="price";}); return p ? p.values[0].value : ""; })() || "",
+        email: ct.email, whatsapp: ct.whatsapp, phone: ct.phone,
+        is_private: !item.advertiser || item.advertiser.type !== "agency",
+        owner_managed: !item.advertiser || item.advertiser.type !== "agency",
+        src: item.urls && item.urls.default || baseUrl,
+      };
+    }).filter(function(i){return i.name;});
+  } catch(e) {
+    return parseSubito(json, baseUrl); // fallback to HTML parser
+  }
+}
+
+function parseCasevacanza(html, baseUrl) {
+  const results = [];
+  // casevacanza.it structured listings
+  const nextM = html.match(/<script[^>]*id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+  if (nextM) {
+    try {
+      const data = JSON.parse(nextM[1]);
+      const props = data.props && data.props.pageProps;
+      const items = (props && (props.listings || props.results || props.accommodations)) || [];
+      items.slice(0, 20).forEach(function(item) {
+        results.push({
+          platform: "mediavacanze",
+          name: item.name || item.title || "Casa Vacanza",
+          type: item.type || item.category || "Casa vacanza",
+          location: item.location || item.city || "",
+          price: item.price ? item.price + "€" : "",
+          rating: item.rating || null,
+          reviews: item.reviewCount || null,
+          is_private: !item.agency,
+          owner_managed: !item.agency,
+          no_agency: !item.agency,
+          src: item.url ? (item.url.startsWith("http") ? item.url : "https://www.casevacanza.it" + item.url) : baseUrl,
+        });
+      });
+    } catch(e) {}
+  }
+  if (results.length === 0) {
+    // Fallback: scan for listing cards
+    const cards = html.match(/class="[^"]*(?:listing|card|property)[^"]*"[^>]*>([\s\S]{50,500}?)(?=class="[^"]*(?:listing|card|property)|$)/gi) || [];
+    cards.slice(0, 15).forEach(function(card) {
+      const t = card.replace(/<[^>]+>/g," ").trim();
+      const nameM = t.match(/([A-Z][^.!?]{10,60})/);
+      const priceM = t.match(/([\d.,]+)\s*€/);
+      if (nameM) results.push({
+        platform: "mediavacanze", name: nameM[1].trim(),
+        type: "Casa vacanza", price: priceM ? priceM[1] + "€" : "",
+        is_private: true, owner_managed: true, src: baseUrl,
+      });
+    });
+  }
+  return results.slice(0, 20);
+}
+
+function parseHolidu(html, baseUrl) {
+  const results = [];
+  const nextM = html.match(/<script[^>]*id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+  if (nextM) {
+    try {
+      const data = JSON.parse(nextM[1]);
+      const props = data.props && data.props.pageProps;
+      const items = (props && (props.initialProps || props.properties || props.results || {}).items) ||
+        (props && props.properties) || [];
+      items.slice(0, 20).forEach(function(item) {
+        results.push({
+          platform: "mediavacanze",
+          name: item.name || item.title || "Holidu Property",
+          type: item.type || "Affitto vacanze",
+          location: item.location || item.city || "",
+          price: item.price ? "~" + item.price + "€/notte" : "",
+          rating: item.rating || null,
+          reviews: item.reviews || null,
+          is_private: false,
+          src: item.url ? (item.url.startsWith("http") ? item.url : "https://www.holidu.it" + item.url) : baseUrl,
+        });
+      });
+    } catch(e) {}
+  }
+  return results.slice(0, 15);
+}
+
+function parseHabitaclia(html, baseUrl) {
+  const results = [];
+  // Habitaclia.com - Spanish portal, simpler structure
+  const listingBlocks = html.match(/class="[^"]*list-item[^"]*"[^>]*>([\s\S]{30,600}?)(?=class="[^"]*list-item|<\/ul>)/gi) || [];
+  listingBlocks.slice(0, 20).forEach(function(block) {
+    const titleM = block.match(/(?:title|heading|name)[^>]*>([^<]{5,80})</i);
+    const priceM = block.match(/([\d.,]+)\s*€(?:\/mes)?/);
+    const linkM  = block.match(/href="([^"]+)"/);
+    const ct     = extractContacts(block);
+    if (titleM || priceM) {
+      results.push({
+        platform: "idealista",
+        name: titleM ? titleM[1].trim() : ("Annuncio Habitaclia"),
+        type: "Appartamento",
+        price: priceM ? priceM[1] + "€/mese" : "",
+        phone: ct.phone, email: ct.email, whatsapp: ct.whatsapp,
+        is_private: false,
+        src: linkM ? (linkM[1].startsWith("http") ? linkM[1] : "https://www.habitaclia.com" + linkM[1]) : baseUrl,
+      });
+    }
+  });
+  // Fallback
+  if (results.length === 0) {
+    const priceMs = html.match(/([\d.,]+)\s*€\/mes/g) || [];
+    const titleMs = html.match(/<h2[^>]*>([^<]{5,60})<\/h2>/g) || [];
+    titleMs.slice(0, 10).forEach(function(t, i) {
+      const name = t.replace(/<[^>]+>/g,"").trim();
+      if (name) results.push({
+        platform: "idealista", name,
+        type: "Appartamento", price: priceMs[i] || "",
+        is_private: false, src: baseUrl,
+      });
+    });
+  }
+  return results.slice(0, 20);
+}
+
+function parseFotocasaApi(json, baseUrl) {
+  try {
+    const data = JSON.parse(json);
+    const items = (data.realEstates || data.result || data.items || []);
+    return items.slice(0, 20).map(function(item) {
+      return {
+        platform: "idealista",
+        name: item.title || item.description || "Annuncio Fotocasa",
+        type: item.propertyType || "Appartamento",
+        location: (item.address && item.address.area) || "",
+        price: item.price ? item.price + "€/mese" : "",
+        is_private: !item.agency,
+        owner_managed: !item.agency,
+        src: item.url ? "https://www.fotocasa.es" + item.url : baseUrl,
+      };
+    }).filter(function(i){return i.name;});
+  } catch(e) { return []; }
 }

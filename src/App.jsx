@@ -341,7 +341,7 @@ async function fetchSerper(query, serperKey) {
 async function apifyRun(actorId, input, apiKey) {
   var res = IS_VERCEL
     ? await fetch("/api/apify", { method:"POST", headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({ path:"/acts/"+actorId+"/runs?memory=128", method:"POST", body:input, token:apiKey }) })
+        body:JSON.stringify({ path:"/acts/"+actorId+"/runs?memory=128", method:"POST", body:input, token:apiKey||"" }) })
     : await fetch("https://api.apify.com/v2/acts/"+actorId+"/runs?token="+apiKey+"&memory=128",
         { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(input) });
   if (!res.ok) {
@@ -576,38 +576,50 @@ async function searchTelegramPublic(dest) {
 }
 
 async function searchMediaVacanze(dest, req) {
-  var country = detectCountry(dest);
-  // MediaVacanze has different URL patterns
-  // For Spain destinations use the Spanish version
-  var baseUrl = country === "es"
-    ? "https://www.mediavacanze.com/es/"
-    : "https://www.mediavacanze.com/it/";
+  // casevacanza.it — simpler HTML, less bot protection, Italian portal
   var encoded = encodeURIComponent(dest);
-  // Try the search results page directly
-  var url = "https://www.mediavacanze.com/case-vacanze.php?pays=&region=&ville=" + encoded + "&npers=&type=&submit=Cercare";
-  return fetchScrape(url, "mediavacanze");
+  var url = "https://www.casevacanza.it/search?q=" + encoded + "&categoria=case-vacanze";
+  var results = await fetchScrape(url, "casevacanza").catch(function(){return [];});
+  // Fallback: holidu.it aggregator
+  if (!results.length) {
+    var slug = normKey(dest).replace(/_/g,"-");
+    url = "https://www.holidu.it/search?location=" + encoded;
+    results = await fetchScrape(url, "holidu").catch(function(){return [];});
+  }
+  return results;
 }
 
 async function searchSubito(dest, req) {
-  var slug = normKey(dest).replace(/_/g,"-");
-  var url = "https://www.subito.it/annunci-italia/affitto-vacanze/case-vacanza/?q=" + encodeURIComponent(dest);
-  return fetchScrape(url, "subito");
+  // Use Subito's JSON search API — less bot-protected than HTML
+  var url = "https://hades.subito.it/v1/search/items?q=" +
+    encodeURIComponent(dest) +
+    "&cats=27&regions=0&shp=0&types=s&lim=25&start=0&sort=datedesc";
+  return fetchScrape(url, "subito_json");
 }
 
 async function searchIdealista(dest, req) {
   var slug = normKey(dest).replace(/_/g,"-");
   var country = detectCountry(dest);
-  var url;
+  var results = [];
+
   if (country === "es") {
-    // Spain: idealista.com/alquiler-viviendas/
-    url = "https://www.idealista.com/alquiler-viviendas/" + slug + "-islas-baleares/";
-    // Fallback for known slugs
-    if (slug === "ibiza") url = "https://www.idealista.com/alquiler-viviendas/ibiza-islas-baleares/";
-    else if (slug === "formentera") url = "https://www.idealista.com/alquiler-viviendas/formentera-islas-baleares/";
+    // Spain: try Habitaclia (less bot-protected than Idealista)
+    var habitUrl = "https://www.habitaclia.com/alquiler-en-" + slug + ".htm";
+    results = await fetchScrape(habitUrl, "habitaclia").catch(function(){return [];});
+    // Fallback: Fotocasa JSON endpoint
+    if (!results.length) {
+      var fcUrl = "https://api.fotocasa.es/PropertySearchService/api/v2/properties?" +
+        "culture=es-ES&isMap=false&isNewConstructionPromotions=false" +
+        "&maxItems=20&order=score&pageIndex=1&propertyTypeId=2&transactionTypeId=2" +
+        "&text=" + encodeURIComponent(dest);
+      results = await fetchScrape(fcUrl, "fotocasa_api").catch(function(){return [];});
+    }
   } else {
-    url = "https://www.idealista.it/affitto-case/" + slug + "/";
+    // Italy: immobiliare.it
+    var url = "https://www.immobiliare.it/affitto-case/" + slug + "/?localiMinimo=1";
+    results = await fetchScrape(url, "immobiliare").catch(function(){return [];});
   }
-  return fetchScrape(url, "idealista");
+  return results;
 }
 
 async function searchImmobiliare(dest, keys) {
@@ -673,6 +685,7 @@ async function runSearch(dest, mode, req, keys, onLog) {
   var tasks = [];
 
   // Google Maps (Serper) — richiede serper key o env var
+  // Serper: run if key in app settings OR if SERPER_API_KEY env var is set on Vercel
   if (IS_VERCEL || keys.serper) {
     tasks.push(wrap("Google Maps", function(){return searchGoogleMaps(dest,mode,req,keys);}));
   }
@@ -686,7 +699,8 @@ async function runSearch(dest, mode, req, keys, onLog) {
   }
 
   // Apify — richiede apify key
-  if (keys.apify && IS_VERCEL) {
+  // Apify: run if key in app settings OR if APIFY_TOKEN env var is set on Vercel
+  if (IS_VERCEL) {
     tasks.push(wrap("Instagram",    function(){return searchInstagram(dest,keys);}));
     tasks.push(wrap("Facebook",     function(){return searchFacebook(dest,keys);}));
     tasks.push(wrap("Immobiliare",  function(){return searchImmobiliare(dest,keys);}));
@@ -1371,7 +1385,7 @@ export default function App() {
     "Ibiza","Mykonos","Sardegna","Bali",
   ];
 
-  var hasKeys = apiKeys.apify || apiKeys.serper;
+  var hasKeys = IS_VERCEL || apiKeys.apify || apiKeys.serper; // Vercel env vars count as active
   var hasErrors = logs.some(function(l){return l.level==="error";});
   var lastMsg = msgs.filter(function(m){return m.leads;}).pop()||null;
 

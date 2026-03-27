@@ -11,11 +11,14 @@ export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   const { path, method = "GET", body, token } = req.body;
-  if (!path || !token) return res.status(400).json({ error: "Missing path or token" });
+  // Use env var as primary, fallback to token from request body
+  const APIFY_TOKEN = process.env.APIFY_TOKEN || token;
+  if (!path) return res.status(400).json({ error: "Missing path" });
+  if (!APIFY_TOKEN) return res.status(400).json({ error: "Apify token mancante — aggiungilo su Vercel Settings > Env Vars come APIFY_TOKEN" });
 
   // If path already has query params, use & otherwise use ?
   const separator = path.includes("?") ? "&" : "?";
-  const url = `https://api.apify.com/v2${path}${separator}token=${token}`;
+  const url = `https://api.apify.com/v2${path}${separator}token=${APIFY_TOKEN}`;
 
   try {
     const options = {
