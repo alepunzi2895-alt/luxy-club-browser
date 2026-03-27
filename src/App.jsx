@@ -728,13 +728,12 @@ async function searchMediaVacanze(dest, req) {
 }
 
 async function searchSubito(dest, keys) {
-  // Subito bloccca Vercel IPs — usiamo Serper per trovare annunci Subito
-  // Cerca "site:subito.it affitto vacanze DEST" via Google
+  // Serper: cerca annunci Subito specifici per la destinazione con link diretto
   try {
     var res = await fetch("/api/serper", {
       method:"POST", headers:{"Content-Type":"application/json"},
       body: JSON.stringify({
-        query: "site:subito.it affitto vacanze " + dest,
+        query: "site:subito.it/annunci affitto vacanze " + dest + " appartamento villa",
         serperKey: keys.serper||"",
         type: "search"
       })
@@ -742,15 +741,23 @@ async function searchSubito(dest, keys) {
     if (!res.ok) throw new Error("Serper " + res.status);
     var data = await res.json();
     var organic = data.organic||[];
-    return organic.filter(function(r){
-      return r.link && r.link.includes("subito.it");
+    var destLower = dest.toLowerCase();
+    return organic.filter(function(r) {
+      if (!r.link || !r.link.includes("subito.it")) return false;
+      // Filtra: link deve essere un annuncio reale (non pagina di ricerca)
+      if (r.link.includes("/annunci-italia/") || r.link.includes("subito.it/?")) return false;
+      // Controlla che il titolo o snippet contenga la destinazione
+      var text = ((r.title||"")+" "+(r.snippet||"")).toLowerCase();
+      return text.includes(destLower) ||
+             text.includes("vacanz") || text.includes("affitto") || text.includes("villa");
     }).map(function(r) {
       var ct = extractContacts((r.snippet||"")+" "+(r.title||""));
-      // Extract price from snippet
       var priceM = (r.snippet||"").match(/(\d[\d.,]+)\s*€/);
+      // Pulisci il titolo da "subito.it ›" ecc
+      var name = (r.title||"Annuncio Subito").replace(/subito\.it\s*[›>|]\s*/gi,"").trim();
       return {
         platform:  "subito",
-        name:      r.title||"Annuncio Subito",
+        name:      name||"Annuncio Subito",
         type:      "Affitto vacanze",
         location:  dest,
         price:     priceM ? priceM[1]+"€" : "",
@@ -760,7 +767,7 @@ async function searchSubito(dest, keys) {
         is_private:    true,
         owner_managed: true,
         no_agency:     true,
-        src:       r.link,
+        src:       r.link, // link diretto all'annuncio
       };
     });
   } catch(e) {
@@ -768,74 +775,109 @@ async function searchSubito(dest, keys) {
   }
 }
 
-async function searchIdealista(dest, req) {
-  var slug = normKey(dest).replace(/_/g,"-");
+async function searchIdealista(dest, keys) {
+  // Usa Serper per trovare annunci reali con link diretti — bypassa bot detection
   var country = detectCountry(dest);
-  var results = [];
-
-  if (country === "es") {
-    // Spain: try Habitaclia (less bot-protected than Idealista)
-    var habitUrl = "https://www.habitaclia.com/alquiler-en-" + slug + ".htm";
-    results = await fetchScrape(habitUrl, "habitaclia").catch(function(){return [];});
-    // Fallback: Fotocasa JSON endpoint
-    if (!results.length) {
-      var fcUrl = "https://api.fotocasa.es/PropertySearchService/api/v2/properties?" +
-        "culture=es-ES&isMap=false&isNewConstructionPromotions=false" +
-        "&maxItems=20&order=score&pageIndex=1&propertyTypeId=2&transactionTypeId=2" +
-        "&text=" + encodeURIComponent(dest);
-      results = await fetchScrape(fcUrl, "fotocasa_api").catch(function(){return [];});
-    }
-  } else {
-    // Italy: immobiliare.it
-    var url = "https://www.immobiliare.it/affitto-case/" + slug + "/?localiMinimo=1";
-    results = await fetchScrape(url, "immobiliare").catch(function(){return [];});
-  }
-  return results;
+  var siteQuery = country === "es"
+    ? "site:idealista.com/inmueble affitto alquiler " + dest
+    : "site:idealista.it/annunci affitto " + dest + " appartamento villa";
+  var baseHost = country === "es" ? "idealista.com" : "idealista.it";
+  try {
+    var res = await fetch("/api/serper", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ query: siteQuery, serperKey: (keys&&keys.serper)||"", type: "search" })
+    });
+    if (!res.ok) throw new Error("Serper "+res.status);
+    var data = await res.json();
+    var destLower = dest.toLowerCase();
+    return (data.organic||[]).filter(function(r) {
+      return r.link && r.link.includes(baseHost) && !r.link.includes("/notizie/");
+    }).map(function(r) {
+      var ct = extractContacts((r.snippet||"")+" "+(r.title||""));
+      var priceM = (r.snippet||"").match(/(\d[\d.,]+)\s*€/);
+      var name = (r.title||"Annuncio Idealista").replace(/idealista\s*[›>|·-]\s*/gi,"").trim();
+      var isPrivate = !/agenzia|agency|inmobiliaria/i.test(r.snippet||"");
+      return {
+        platform:  "idealista",
+        name:      name||"Annuncio Idealista",
+        type:      "Appartamento / Villa",
+        location:  dest,
+        price:     priceM ? priceM[1]+"€/mese" : "",
+        email:     ct.email,
+        whatsapp:  ct.whatsapp,
+        phone:     ct.phone,
+        is_private:    isPrivate,
+        owner_managed: isPrivate,
+        no_agency:     isPrivate,
+        src:       r.link,
+      };
+    });
+  } catch(e) { return []; }
 }
 
 async function searchImmobiliare(dest, keys) {
-  // igolaizola/immobiliare-it-scraper — free Apify actor (works for Italy)
-  // For Spain use idealista via Apify or Habitaclia fallback
   var country = detectCountry(dest);
-  if (country === "it" || country === "id") {
+  // Per Italia: Serper su immobiliare.it — link diretti agli annunci
+  if (country === "it") {
     try {
-      var runId = await apifyRun("igolaizola~immobiliare-it-scraper", {
-        startUrls: [{
-          url: "https://www.immobiliare.it/affitto-case/" +
-            normKey(dest).replace(/_/g,"-") + "/?localiMinimo=1"
-        }],
-        maxItems: 20,
-      }, keys.apify||"");
-      var dsId  = await apifyWait(runId, keys.apify||"");
-      var items = await apifyItems(dsId, keys.apify||"", 20);
-      return items.filter(function(i){return i.title||i.address;}).map(function(item) {
-        var isPrivate = !item.agency && item.advertiserType !== "agency";
-        var ct = extractContacts((item.description||"")+" "+(item.phone||"")+" "+(item.email||""));
+      var res = await fetch("/api/serper", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({
+          query: "site:immobiliare.it/annunci affitto " + dest + " appartamento villa casa",
+          serperKey: (keys&&keys.serper)||"", type: "search"
+        })
+      });
+      if (!res.ok) throw new Error("Serper "+res.status);
+      var data = await res.json();
+      return (data.organic||[]).filter(function(r) {
+        return r.link && r.link.includes("immobiliare.it") && r.link.includes("/annunci/");
+      }).map(function(r) {
+        var ct = extractContacts((r.snippet||"")+" "+(r.title||""));
+        var priceM = (r.snippet||"").match(/(\d[\d.,]+)\s*€/);
+        var name = (r.title||"Annuncio Immobiliare").replace(/immobiliare\.it\s*[›>|·-]\s*/gi,"").trim();
+        var isPrivate = !/agenzia|agency/i.test(r.snippet||"");
         return {
           platform:  "immobiliare",
-          name:      item.title||item.address||"Annuncio Immobiliare",
-          type:      item.propertyType||item.category||"Appartamento",
-          location:  item.city||item.address||dest,
-          price:     item.price ? item.price+"€/mese" : "",
-          phone:     item.phone||item.phones&&item.phones[0]||ct.phone||null,
-          email:     item.email||ct.email||null,
-          is_private:    isPrivate,
-          owner_managed: isPrivate,
-          no_agency:     isPrivate,
-          src: item.url||"https://www.immobiliare.it",
+          name:      name||"Annuncio Immobiliare.it",
+          type:      "Appartamento / Villa",
+          location:  dest,
+          price:     priceM ? priceM[1]+"€/mese" : "",
+          email:     ct.email, whatsapp: ct.whatsapp, phone: ct.phone,
+          is_private: isPrivate, owner_managed: isPrivate, no_agency: isPrivate,
+          src: r.link,
         };
       });
-    } catch(e) {
-      // Fallback HTML for Italy
-      var slug = normKey(dest).replace(/_/g,"-");
-      return fetchScrape("https://www.immobiliare.it/affitto-case/"+slug+"/", "immobiliare").catch(function(){return [];});
-    }
+    } catch(e) { return []; }
   } else {
-    // Spain/Greece: use Habitaclia scrape
-    var slug2 = normKey(dest).replace(/_/g,"-");
-    return fetchScrape("https://www.habitaclia.com/alquiler-en-"+slug2+".htm", "habitaclia").catch(function(){return [];});
+    // Per Spagna/Grecia: Fotocasa o Habitaclia via Serper
+    var site = country === "es" ? "fotocasa.es" : "spitogatos.gr";
+    try {
+      var res2 = await fetch("/api/serper", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({
+          query: "site:"+site+" alquiler rent " + dest + " villa apartamento",
+          serperKey: (keys&&keys.serper)||"", type: "search"
+        })
+      });
+      if (!res2.ok) throw new Error("Serper "+res2.status);
+      var data2 = await res2.json();
+      return (data2.organic||[]).filter(function(r){return r.link&&r.link.includes(site);}).map(function(r) {
+        var priceM2 = (r.snippet||"").match(/(\d[\d.,]+)\s*€/);
+        var name2 = (r.title||"Annuncio").replace(/fotocasa|spitogatos/gi,"").trim();
+        return {
+          platform:  "idealista",
+          name:      name2||"Annuncio",
+          type:      "Appartamento / Villa",
+          location:  dest,
+          price:     priceM2 ? priceM2[1]+"€" : "",
+          is_private: false,
+          src: r.link,
+        };
+      });
+    } catch(e) { return []; }
   }
 }
+
 
 // ─── RUN SEARCH ───────────────────────────────────────────────────────────────
 async function runSearch(dest, mode, req, keys, onLog) {
@@ -993,45 +1035,52 @@ function FilterBadges(props) {
 
 function LeadCard(props) {
   var s = props.lead;
-  var [open, setOpen] = useState(false);
-  var [msgs, setMsgs] = useState(null);
-  var [loadMsg, setLoadMsg] = useState(false);
-  var [status, setStatus] = useState(s.status||"new");
+  var [open,      setOpen]      = useState(false);
+  var [msgs,      setMsgs]      = useState(null);
+  var [loadMsg,   setLoadMsg]   = useState(false);
+  var [msgLang,   setMsgLang]   = useState("it");
+  var [status,    setStatus]    = useState(s.status||"new");
+
   var sc = s.score||0;
   var c  = sc>=70?"#34D399":sc>=45?"#FBBF24":"#9CA3AF";
   var pm = PLATFORMS[s.platform]||{label:s.platform,color:"#6B7280"};
 
-  var STATUS_COLORS = {
-    new:"#6B7280", contacted:"#FBBF24", replied:"#60A5FA",
-    qualified:"#34D399", active:"#EC4899", archived:"#374151"
-  };
-  var STATUS_LABELS = {
-    new:"Nuovo", contacted:"Contattato", replied:"Risposto",
-    qualified:"Qualificato", active:"Attivo", archived:"Archiviato"
-  };
+  var STATUS_COLORS  = {new:"#6B7280",contacted:"#FBBF24",replied:"#60A5FA",qualified:"#34D399",active:"#EC4899",archived:"#374151"};
+  var STATUS_LABELS  = {new:"Nuovo",contacted:"Contattato",replied:"Risposto",qualified:"Qualificato",active:"Attivo",archived:"Archiviato"};
+  var stColor = STATUS_COLORS[status]||"#6B7280";
+
+  var currentMsg = msgs ? (msgs[msgLang]||msgs) : {};
+  var langColor  = msgLang==="it"?"#34D399":msgLang==="en"?"#60A5FA":"#F472B6";
+
+  function copy(t) { navigator.clipboard.writeText(t||"").catch(function(){}); }
 
   async function genMsg() {
     if (msgs) return;
     setLoadMsg(true);
     try {
-      var sys = "Sei un consulente luxury. Genera messaggi brevi per proporre collaborazione a commissione (12%, zero costi fissi). Tono diretto, professionale, non commerciale. Rispondi SOLO JSON: {\"whatsapp\":\"msg max 3 righe\",\"email_subject\":\"oggetto\",\"email_body\":\"corpo max 5 righe\"}";
-      var prompt = "Struttura: "+s.name+"\nTipo: "+s.type+"\nLocation: "+s.location;
-      var raw = await callClaude(prompt, sys);
+      var sysPrompt = "Tourism partnership consultant. Propose 12% commission collaboration (zero fixed costs). Generate in ALL 3 languages. Reply ONLY valid JSON: " +
+        '{"it":{"whatsapp":"msg IT 3 lines","email_subject":"oggetto","email_body":"corpo 5 righe"},' +
+        '"en":{"whatsapp":"msg EN 3 lines","email_subject":"subject","email_body":"body 5 lines"},' +
+        '"es":{"whatsapp":"msg ES 3 lineas","email_subject":"asunto","email_body":"cuerpo 5 lineas"}}';
+      var userPrompt = "Structure: " + s.name + "\nType: " + s.type + "\nLocation: " + s.location;
+      var raw = await callClaude(userPrompt, sysPrompt);
       var parsed = parseJSON(raw);
-      setMsgs(parsed || { whatsapp:raw.slice(0,200), email_subject:"Collaborazione LuXy Club", email_body:raw });
+      if (parsed && parsed.it) {
+        setMsgs(parsed);
+      } else if (parsed && parsed.whatsapp) {
+        setMsgs({it:parsed, en:{whatsapp:"",email_subject:"",email_body:""}, es:{whatsapp:"",email_subject:"",email_body:""}});
+      } else {
+        setMsgs({it:{whatsapp:raw.slice(0,200),email_subject:"Collaborazione LuXy Club",email_body:raw}, en:{whatsapp:"",email_subject:"",email_body:""}, es:{whatsapp:"",email_subject:"",email_body:""}});
+      }
     } catch(e) { alert("Errore: "+e.message); }
     setLoadMsg(false);
   }
-
-  function copy(t) { navigator.clipboard.writeText(t).catch(function(){}); }
-
-  var stColor = STATUS_COLORS[status]||"#6B7280";
 
   return (
     <div style={{background:"rgba(255,255,255,0.03)",border:"1px solid "+c+"25",
       borderRadius:12,marginBottom:8,overflow:"hidden",animation:"fadeUp 0.2s ease"}}>
 
-      {/* HEADER ROW */}
+      {/* HEADER */}
       <div style={{padding:"12px 14px",display:"flex",gap:10,alignItems:"flex-start",
         cursor:"pointer"}} onClick={function(){setOpen(function(o){return !o;});}}>
         <ScoreRing score={sc}/>
@@ -1047,20 +1096,20 @@ function LeadCard(props) {
             {s.priority==="HIGH"&&<span style={{fontSize:10,padding:"2px 6px",borderRadius:20,
               background:"rgba(52,211,153,0.15)",color:"#34D399",fontWeight:700}}>HIGH</span>}
           </div>
-          <div className="lx-card-name" style={{fontSize:15,fontWeight:700,color:"#F9FAFB",marginBottom:3,
+          <div className="lx-card-name" style={{fontSize:15,fontWeight:700,color:"#F9FAFB",marginBottom:2,
             overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{s.name}</div>
           <div style={{fontSize:10,color:"#6B7280",display:"flex",gap:8,flexWrap:"wrap"}}>
-            {s.location&&<span>📍 {s.location}</span>}
-            {s.price&&<span>💶 {s.price}</span>}
-            {s.rating&&<span>⭐ {s.rating}{s.reviews?" ("+s.reviews+")":""}</span>}
+            {s.location&&<span>{"📍 "+s.location}</span>}
+            {s.price&&<span>{"💶 "+s.price}</span>}
+            {s.rating&&<span>{"⭐ "+s.rating+(s.reviews?" ("+s.reviews+")":"")}</span>}
           </div>
-          {s.scoreReason&&<div style={{fontSize:10,color:c,marginTop:3}}>✓ {s.scoreReason}</div>}
+          {s.scoreReason&&<div style={{fontSize:10,color:c,marginTop:3}}>{"✓ "+s.scoreReason}</div>}
           {s.matchReasons&&s.matchReasons.length>0&&(
             <div style={{display:"flex",gap:4,flexWrap:"wrap",marginTop:4}}>
               {s.matchReasons.map(function(r,i){
                 return <span key={i} style={{fontSize:10,padding:"2px 7px",borderRadius:20,
                   background:"rgba(16,185,129,0.12)",border:"1px solid rgba(16,185,129,0.28)",
-                  color:"#34D399"}}>✓ {r}</span>;
+                  color:"#34D399"}}>{"✓ "+r}</span>;
               })}
             </div>
           )}
@@ -1070,41 +1119,46 @@ function LeadCard(props) {
 
       {/* EXPANDED */}
       {open&&(
-        <div style={{borderTop:"1px solid rgba(255,255,255,0.06)",
-          padding:"12px 14px",background:"rgba(0,0,0,0.18)"}}>
+        <div style={{borderTop:"1px solid rgba(255,255,255,0.06)",padding:"12px 14px",background:"rgba(0,0,0,0.18)"}}>
 
           {/* Contacts */}
           <div style={{marginBottom:10}}>
-            {s.whatsapp&&<Chip icon="💬" label={s.whatsapp}
-              href={"https://wa.me/"+s.whatsapp.replace(/[^0-9+]/g,"")} c="#34D399"/>}
+            {s.whatsapp&&(
+              <Chip icon="💬" label={s.whatsapp}
+                href={"https://wa.me/"+s.whatsapp.replace(/[^0-9+]/g,"")} c="#34D399"/>
+            )}
             {s.phone&&(
               <span>
-                <Chip icon="📞" label={s.phone}
-                  href={"tel:"+s.phone} c="#FBBF24"/>
+                <Chip icon="📞" label={s.phone} href={"tel:"+s.phone} c="#FBBF24"/>
                 <Chip icon="💬 WA" label="Apri WA"
                   href={"https://wa.me/"+s.phone.replace(/[^0-9+]/g,"")} c="#25D366"/>
               </span>
             )}
-            {s.email&&<Chip icon="✉" label={s.email}
-              href={"mailto:"+s.email} c="#60A5FA"/>}
+            {s.email&&<Chip icon="✉" label={s.email} href={"mailto:"+s.email} c="#60A5FA"/>}
             {s.instagram&&<Chip icon="📸" label={s.instagram}
               href={"https://instagram.com/"+s.instagram.replace("@","")} c="#E1306C"/>}
             {s.telegram_channel&&<Chip icon="✈" label={"@"+s.telegram_channel}
               href={s.channel_url||("https://t.me/"+s.telegram_channel)} c="#26A5E4"/>}
-            {s.website&&<Chip icon="🔗" label={s.website.replace(/^https?:\/\//,"").split("/")[0]}
+            {s.website&&<Chip icon="🔗"
+              label={s.website.replace(/^https?:\/\//,"").split("/")[0]}
               href={s.website} c="#C084FC"/>}
-            {s.src&&<Chip icon="📋" label={s.platform==="telegram"?"Vai al post":"Scheda"}
+            {s.src&&<Chip icon="📋"
+              label={s.platform==="telegram"?"Vai al post":"Scheda"}
               href={s.src} c="#6B7280"/>}
           </div>
 
-          {/* Bio / description */}
-          {s.bio&&<div style={{fontSize:11,color:"#9CA3AF",fontStyle:"italic",
-            marginBottom:10,padding:"6px 8px",background:"rgba(255,255,255,0.02)",
-            borderRadius:6,lineHeight:1.6}}>{s.bio}</div>}
+          {/* Bio */}
+          {s.bio&&(
+            <div style={{fontSize:11,color:"#9CA3AF",fontStyle:"italic",marginBottom:10,
+              padding:"6px 8px",background:"rgba(255,255,255,0.02)",borderRadius:6,lineHeight:1.6}}>
+              {s.bio}
+            </div>
+          )}
 
           {/* Actions */}
-          <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
-            <select value={status} onChange={function(e){setStatus(e.target.value);props.onStatus(s.id,e.target.value);}}
+          <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center",marginBottom:10}}>
+            <select value={status}
+              onChange={function(e){setStatus(e.target.value);props.onStatus(s.id,e.target.value);}}
               onClick={function(e){e.stopPropagation();}}
               style={{fontSize:11,padding:"5px 9px",borderRadius:8,
                 background:stColor+"18",border:"1px solid "+stColor+"40",
@@ -1113,10 +1167,15 @@ function LeadCard(props) {
                 return <option key={k} value={k}>{STATUS_LABELS[k]}</option>;
               })}
             </select>
-            <button onClick={function(e){e.stopPropagation();var t=(s.whatsapp?"https://wa.me/"+s.whatsapp.replace(/[^0-9+]/g,""):s.email||s.phone||"");navigator.clipboard.writeText(t).catch(function(){});}}
-              style={{fontSize:11,padding:"5px 10px",borderRadius:8,border:"1px solid rgba(255,255,255,0.1)",
+            <button onClick={function(e){
+                e.stopPropagation();
+                var t = s.whatsapp?"https://wa.me/"+s.whatsapp.replace(/[^0-9+]/g,""):s.email||s.phone||"";
+                copy(t);
+              }}
+              style={{fontSize:11,padding:"5px 10px",borderRadius:8,
+                border:"1px solid rgba(255,255,255,0.1)",
                 background:"rgba(255,255,255,0.04)",color:"#9CA3AF",cursor:"pointer"}}>
-              📋 Copia
+              {"📋 Copia"}
             </button>
             <button onClick={function(e){e.stopPropagation();genMsg();}}
               style={{fontSize:11,padding:"5px 10px",borderRadius:8,
@@ -1128,67 +1187,94 @@ function LeadCard(props) {
 
           {/* Score details */}
           {s.scoreReason&&(
-            <div style={{marginTop:10,padding:"7px 10px",background:"rgba(255,255,255,0.02)",
+            <div style={{marginBottom:10,padding:"7px 10px",background:"rgba(255,255,255,0.02)",
               borderRadius:8,border:"1px solid rgba(255,255,255,0.06)"}}>
-              <div style={{fontSize:9,color:"#4B5563",textTransform:"uppercase",
-                letterSpacing:"0.08em",marginBottom:4}}>Score {s.score} — Motivazioni</div>
+              <div style={{fontSize:9,color:"#4B5563",textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:4}}>
+                {"Score "+s.score}
+              </div>
               <div style={{fontSize:11,color:"#6B7280",lineHeight:1.7}}>{s.scoreReason}</div>
-              {s.scoreFlags&&s.scoreFlags.length>0&&(
-                <div style={{marginTop:4}}>
-                  {s.scoreFlags.map(function(f,i){
-                    return <div key={i} style={{fontSize:10,color:"#F87171"}}>⚠ {f}</div>;
-                  })}
-                </div>
-              )}
-              {s.penalties&&s.penalties.length>0&&(
-                <div style={{marginTop:4}}>
-                  {s.penalties.map(function(p,i){
-                    return <div key={i} style={{fontSize:10,color:"#F87171"}}>⚠ {p}</div>;
-                  })}
-                </div>
-              )}
+              {s.scoreFlags&&s.scoreFlags.map&&s.scoreFlags.map(function(f,i){
+                return <div key={i} style={{fontSize:10,color:"#F87171"}}>{"⚠ "+f}</div>;
+              })}
             </div>
           )}
 
-          {/* Messages */}
+          {/* Messages — 3 lingue */}
           {msgs&&(
-            <div className="lx-msg-grid" style={{marginTop:10,display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
-              <div style={{padding:10,background:"rgba(52,211,153,0.06)",
-                border:"1px solid rgba(52,211,153,0.18)",borderRadius:9}}>
-                <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
-                  <span style={{fontSize:10,fontWeight:700,color:"#34D399",textTransform:"uppercase"}}>💬 WhatsApp</span>
-                  <button onClick={function(){copy(msgs.whatsapp);}}
-                    style={{fontSize:10,padding:"2px 7px",borderRadius:5,border:"1px solid rgba(52,211,153,0.3)",
-                      background:"transparent",color:"#34D399",cursor:"pointer"}}>Copia</button>
-                </div>
-                <div style={{fontSize:12,color:"#D1D5DB",lineHeight:1.7,whiteSpace:"pre-wrap"}}>{msgs.whatsapp}</div>
-                {s.whatsapp&&<a href={"https://wa.me/"+s.whatsapp.replace(/[^0-9+]/g,"")+"?text="+encodeURIComponent(msgs.whatsapp)}
-                  target="_blank" rel="noopener noreferrer"
-                  style={{display:"inline-block",marginTop:7,fontSize:11,padding:"4px 10px",borderRadius:7,
-                    background:"rgba(52,211,153,0.18)",color:"#34D399",textDecoration:"none",fontWeight:700}}>
-                  Invia su WA →
-                </a>}
+            <div style={{marginTop:6}}>
+              {/* Lang tabs */}
+              <div style={{display:"flex",gap:5,marginBottom:8}}>
+                {["it","en","es"].map(function(lang){
+                  var labels = {it:"🇮🇹 IT",en:"🇬🇧 EN",es:"🇪🇸 ES"};
+                  var colors = {it:"#34D399",en:"#60A5FA",es:"#F472B6"};
+                  var active = msgLang===lang;
+                  return (
+                    <button key={lang}
+                      onClick={function(){setMsgLang(lang);}}
+                      style={{fontSize:10,padding:"3px 10px",borderRadius:20,cursor:"pointer",
+                        fontWeight:active?700:400,
+                        background:active?colors[lang]+"20":"transparent",
+                        border:"1px solid "+(active?colors[lang]+"60":"rgba(255,255,255,0.1)"),
+                        color:active?colors[lang]:"#6B7280"}}>
+                      {labels[lang]}
+                    </button>
+                  );
+                })}
               </div>
-              <div style={{padding:10,background:"rgba(96,165,250,0.06)",
-                border:"1px solid rgba(96,165,250,0.18)",borderRadius:9}}>
-                <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
-                  <span style={{fontSize:10,fontWeight:700,color:"#60A5FA",textTransform:"uppercase"}}>✉ Email</span>
-                  <button onClick={function(){copy(msgs.email_subject+"\n\n"+msgs.email_body);}}
-                    style={{fontSize:10,padding:"2px 7px",borderRadius:5,border:"1px solid rgba(96,165,250,0.3)",
-                      background:"transparent",color:"#60A5FA",cursor:"pointer"}}>Copia</button>
+              {/* WA + Email for selected lang */}
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                <div style={{padding:8,background:langColor+"10",
+                  border:"1px solid "+langColor+"28",borderRadius:8}}>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}>
+                    <span style={{fontSize:9,fontWeight:700,color:langColor}}>{"💬 WhatsApp"}</span>
+                    <button onClick={function(){copy(currentMsg.whatsapp);}}
+                      style={{fontSize:9,padding:"1px 6px",borderRadius:4,
+                        border:"1px solid "+langColor+"40",background:"transparent",
+                        color:langColor,cursor:"pointer"}}>Copia</button>
+                  </div>
+                  <div style={{fontSize:11,color:"#D1D5DB",lineHeight:1.6,whiteSpace:"pre-wrap"}}>
+                    {currentMsg.whatsapp}
+                  </div>
+                  {s.whatsapp&&currentMsg.whatsapp&&(
+                    <a href={"https://wa.me/"+s.whatsapp.replace(/[^0-9+]/g,"")+"?text="+encodeURIComponent(currentMsg.whatsapp||"")}
+                      target="_blank" rel="noopener noreferrer"
+                      style={{display:"inline-block",marginTop:6,fontSize:10,padding:"3px 8px",
+                        borderRadius:6,background:langColor+"22",color:langColor,
+                        textDecoration:"none",fontWeight:700}}>
+                      {"Invia WA →"}
+                    </a>
+                  )}
                 </div>
-                <div style={{fontSize:11,fontWeight:700,color:"#60A5FA",marginBottom:5}}>
-                  Oggetto: {msgs.email_subject}
+                <div style={{padding:8,background:"rgba(255,255,255,0.02)",
+                  border:"1px solid rgba(255,255,255,0.08)",borderRadius:8}}>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}>
+                    <span style={{fontSize:9,fontWeight:700,color:"#9CA3AF"}}>{"✉ Email"}</span>
+                    <button onClick={function(){copy((currentMsg.email_subject||"")+"\n\n"+(currentMsg.email_body||""));}}
+                      style={{fontSize:9,padding:"1px 6px",borderRadius:4,
+                        border:"1px solid rgba(255,255,255,0.15)",background:"transparent",
+                        color:"#9CA3AF",cursor:"pointer"}}>Copia</button>
+                  </div>
+                  {currentMsg.email_subject&&(
+                    <div style={{fontSize:10,fontWeight:700,color:"#9CA3AF",marginBottom:4}}>
+                      {"Ogg: "+currentMsg.email_subject}
+                    </div>
+                  )}
+                  <div style={{fontSize:11,color:"#D1D5DB",lineHeight:1.6,whiteSpace:"pre-wrap"}}>
+                    {currentMsg.email_body}
+                  </div>
+                  {s.email&&currentMsg.email_body&&(
+                    <a href={"mailto:"+s.email+"?subject="+encodeURIComponent(currentMsg.email_subject||"")+"&body="+encodeURIComponent(currentMsg.email_body||"")}
+                      style={{display:"inline-block",marginTop:6,fontSize:10,padding:"3px 8px",
+                        borderRadius:6,background:"rgba(255,255,255,0.08)",
+                        color:"#9CA3AF",textDecoration:"none",fontWeight:700}}>
+                      {"Apri Email →"}
+                    </a>
+                  )}
                 </div>
-                <div style={{fontSize:12,color:"#D1D5DB",lineHeight:1.7,whiteSpace:"pre-wrap"}}>{msgs.email_body}</div>
-                {s.email&&<a href={"mailto:"+s.email+"?subject="+encodeURIComponent(msgs.email_subject)+"&body="+encodeURIComponent(msgs.email_body)}
-                  style={{display:"inline-block",marginTop:7,fontSize:11,padding:"4px 10px",borderRadius:7,
-                    background:"rgba(96,165,250,0.18)",color:"#60A5FA",textDecoration:"none",fontWeight:700}}>
-                  Apri Email →
-                </a>}
               </div>
             </div>
           )}
+
         </div>
       )}
     </div>
