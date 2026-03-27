@@ -26,14 +26,16 @@ var PLATFORMS = {
 };
 
 var TELEGRAM_MAP = {
-  ibiza:    ["ibizahousing","ibizarentals","affittiibiza"],
-  sardegna: ["affittisardegna","sardegnacase"],
-  mykonos:  ["mykonosrentals"],
-  bali:     ["balirentals"],
-  puglia:   ["affittipuglia"],
-  sicilia:  ["affittisicilia"],
-  roma:     ["affittiroma"],
-  default:  ["affittivacanze","caseinaffitto"],
+  ibiza:      ["ibizalife","ibizarental","ibizahouse","eivissalife"],
+  formentera: ["formenteralife","formenterarental"],
+  sardegna:   ["sardegnarental","affittisardegna","sardegnacase","sardinia"],
+  sicilia:    ["siciliaaffitti","sicilyrental"],
+  puglia:     ["pugliaaffitti","pugliavacanze"],
+  mykonos:    ["mykonoslife","mykonosrental","mykonosgreece"],
+  bali:       ["balilife","balirentals","balivilla"],
+  roma:       ["romaaffitti","roomsrome"],
+  milano:     ["milanoflatrent","milanorental"],
+  default:    ["vacanzeitalia","affittivacanze","rentitaly","italyvillas"],
 };
 
 var NLP_PROMPT = "Sei un parser di richieste alloggio. Estrai i parametri dal testo e rispondi SOLO con JSON valido, nessun testo extra. " +
@@ -78,6 +80,19 @@ function normKey(t) {
     .replace(/[\u0300-\u036f]/g,"").replace(/[^a-z0-9]+/g,"_").replace(/^_|_$/g,"");
 }
 
+function detectCountry(dest) {
+  var d = normKey(dest);
+  var spain = ["ibiza","formentera","maiorca","mallorca","barcellona","madrid","valencia","siviglia","tenerife","gran canaria","lanzarote","fuerteventura","costa brava","costa del sol","marbella","menorca","minorca"];
+  var italy = ["sardegna","sicilia","puglia","toscana","roma","milano","napoli","amalfi","cinque terre","venezia","firenze","bologna","palermo","rimini","riccione","gallipoli","otranto","taormina","siracusa","agrigento","trapani"];
+  var greece = ["mykonos","santorini","creta","rodi","corfu","corfù","zakynthos","cefalonia","atene","skiathos","paros","naxos","ios","milos"];
+  var bali = ["bali","lombok","seminyak","ubud","canggu","uluwatu"];
+  if (spain.some(function(s){return d.includes(s);})) return "es";
+  if (italy.some(function(s){return d.includes(s);})) return "it";
+  if (greece.some(function(s){return d.includes(s);})) return "gr";
+  if (bali.some(function(s){return d.includes(s);})) return "id";
+  return "it"; // default Italy
+}
+
 function parseJSON(t) {
   if (!t) return null;
   var s = t.replace(/```json/g,"").replace(/```/g,"").trim();
@@ -96,6 +111,101 @@ function extractContacts(text) {
     whatsapp: waM ? (waM[1]||waM[2]||"").replace(/\D/g,"") || null : null,
     phone:    (!waM && phM) ? phM[0].replace(/\s+/g,"") : null,
   };
+}
+
+// ─── AGENT v4: ENRICHMENT LOOP ───────────────────────────────────────────────
+// For leads missing email/whatsapp, try to find them by:
+// 1. Scraping the lead's website /contact page
+// 2. Searching Google for the name + contact info
+async function enrichLead(lead, serperKey) {
+  var enriched = Object.assign({}, lead);
+  var found = { email: lead.email, whatsapp: lead.whatsapp, phone: lead.phone };
+
+  // Step 1: Scrape website if available and missing contacts
+  if (lead.website && (!found.email && !found.whatsapp)) {
+    var contactPages = [
+      lead.website.replace(/\/$/, "") + "/contact",
+      lead.website.replace(/\/$/, "") + "/contacts",
+      lead.website.replace(/\/$/, "") + "/contatti",
+      lead.website.replace(/\/$/, "") + "/contatto",
+      lead.website.replace(/\/$/, "") + "/about",
+    ];
+    for (var i = 0; i < contactPages.length; i++) {
+      try {
+        var res = await fetch("/api/scrape", {
+          method:"POST", headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({ url: contactPages[i], platform: "contact" })
+        });
+        if (res.ok) {
+          var d = await res.json();
+          var ct = extractContacts((d.html||d.text||JSON.stringify(d.results||"")));
+          if (ct.email)    { found.email    = ct.email;    break; }
+          if (ct.whatsapp) { found.whatsapp  = ct.whatsapp; break; }
+          if (ct.phone && !found.phone) found.phone = ct.phone;
+        }
+      } catch(e) {}
+    }
+  }
+
+  // Step 2: Google search for missing contacts
+  if ((!found.email && !found.whatsapp) && (IS_VERCEL || serperKey) && lead.name) {
+    try {
+      var query = lead.name + " " + (lead.location||"") + " email whatsapp contact";
+      var res2 = await fetch("/api/serper", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ query: query, serperKey: serperKey||"", type: "search" })
+      });
+      if (res2.ok) {
+        var sd = await res2.json();
+        var snippets = (sd.organic||[]).slice(0,3).map(function(r){
+          return (r.snippet||"") + " " + (r.link||"");
+        }).join(" ");
+        var ct2 = extractContacts(snippets);
+        if (ct2.email)    found.email    = found.email    || ct2.email;
+        if (ct2.whatsapp) found.whatsapp  = found.whatsapp || ct2.whatsapp;
+        if (ct2.phone)    found.phone    = found.phone    || ct2.phone;
+        // Also check if any result has a website we haven't scraped
+        if (!lead.website && sd.organic && sd.organic[0]) {
+          enriched.website = sd.organic[0].link;
+        }
+      }
+    } catch(e) {}
+  }
+
+  // Apply found contacts
+  if (found.email    !== lead.email)    enriched.email    = found.email;
+  if (found.whatsapp !== lead.whatsapp) enriched.whatsapp = found.whatsapp;
+  if (found.phone    !== lead.phone)    enriched.phone    = found.phone;
+  enriched.enriched = (found.email !== lead.email || found.whatsapp !== lead.whatsapp);
+  return enriched;
+}
+
+async function runEnrichment(leads, apiKeys, onLog) {
+  // Only enrich HIGH/MEDIUM leads missing both email and whatsapp
+  var toEnrich = leads.filter(function(l) {
+    return (l.priority === "HIGH" || l.priority === "MEDIUM") &&
+           !l.email && !l.whatsapp && (l.website || l.name);
+  }).slice(0, 10); // max 10 to avoid timeout
+
+  if (!toEnrich.length) return leads;
+  onLog("Agente v4", "loading");
+
+  var enriched = 0;
+  var enrichedLeads = leads.map(function(l){ return Object.assign({},l); });
+
+  for (var i = 0; i < toEnrich.length; i++) {
+    try {
+      var result = await enrichLead(toEnrich[i], apiKeys.serper);
+      if (result.enriched) {
+        enriched++;
+        var idx = enrichedLeads.findIndex(function(l){ return l.id === result.id; });
+        if (idx >= 0) enrichedLeads[idx] = result;
+      }
+    } catch(e) {}
+  }
+
+  onLog("Agente v4", "done:" + enriched);
+  return enrichedLeads;
 }
 
 function detectSiteLevel(url) {
@@ -264,13 +374,79 @@ async function apifyItems(datasetId, apiKey, limit) {
 
 // ─── CHANNEL SCRAPERS ─────────────────────────────────────────────────────────
 
+// Types to EXCLUDE from Google Maps results
+var MAPS_EXCLUDE_TYPES = [
+  "real_estate_agency","travel_agency","car_rental","car_dealer","gas_station",
+  "supermarket","grocery","store","shop","restaurant","bar","cafe","gym","spa",
+  "bank","school","hospital","church","museum","tourist_attraction","park",
+  "pharmacy","insurance_agency","lawyer","accounting","electrician","plumber",
+  "stadium","night_club","casino","airport","transit_station","bus_station",
+  "group","community","association","club",
+];
+// Types to INCLUDE
+var MAPS_INCLUDE_TYPES = [
+  "lodging","hotel","motel","guest_house","bed_and_breakfast","apartment","resort",
+  "villa","hostel","campground","vacation_rental","holiday_rental","agriturismo",
+  "real_estate","property_management","rental_service","housing",
+];
+
+function isTouristAccommodation(p) {
+  var name = (p.title||p.name||"").toLowerCase();
+  var type = (p.type||p.category||"").toLowerCase();
+  // Explicit exclude
+  if (MAPS_EXCLUDE_TYPES.some(function(t){return type.includes(t);})) {
+    // But override if name clearly says accommodation
+    if (!/(villa|hotel|b&b|appartamento|resort|hostel|agriturismo|rental|affitto|vacanz|suite|rooms?)/.test(name)) return false;
+  }
+  // Explicit include by type
+  if (MAPS_INCLUDE_TYPES.some(function(t){return type.includes(t);})) return true;
+  // Include by name keywords
+  if (/(villa|hotel|b&b|b & b|appartamento|resort|hostel|agriturismo|rental|affitto|vacanz|suite|rooms?|albergo|pensione|locanda|masseria|trullo|chalet|bungalow|glamping|camping)/i.test(name)) return true;
+  // Exclude common non-accommodation patterns
+  if (/(agenzia|studio|ufficio|negozio|farmacia|supermercato|centro|servizi)/i.test(name)) return false;
+  return true; // default allow
+}
+
 async function searchGoogleMaps(dest, mode, req, keys) {
-  var suffix = mode==="villaggi" ? " resort villa" : mode==="agenzie" ? " agenzia affitti" : " affitto vacanze";
-  var query = dest + suffix;
-  var data = await fetchSerper(query, keys.serper);
-  var places = data.places || data.local || [];
-  return places.slice(0,20).map(function(p) {
+  // Run multiple targeted queries in parallel for better coverage
+  var queries = [];
+  if (mode === "villaggi") {
+    queries = [dest + " resort villaggi turistici", dest + " hotel boutique"];
+  } else if (mode === "agenzie") {
+    queries = [dest + " agenzia affitti vacanze", dest + " property management"];
+  } else {
+    queries = [
+      dest + " villa appartamento affitto vacanze",
+      dest + " bed breakfast hotel boutique",
+      dest + " casa vacanze privato",
+    ];
+  }
+
+  var allPlaces = [], seenNames = {};
+  for (var qi = 0; qi < queries.length; qi++) {
+    try {
+      var data = await fetchSerper(queries[qi], keys.serper);
+      var places = data.places || data.local || [];
+      places.forEach(function(p) {
+        var k = (p.title||p.name||"").toLowerCase().replace(/\s+/g,"");
+        if (!k || seenNames[k]) return;
+        if (!isTouristAccommodation(p)) return;
+        seenNames[k] = true;
+        allPlaces.push(p);
+      });
+    } catch(e) {}
+    if (allPlaces.length >= 20) break;
+  }
+
+  return allPlaces.slice(0,20).map(function(p) {
     var siteLevel = detectSiteLevel(p.website);
+    var isChain = !!(p.name && /marriott|hilton|hyatt|ibis|nh hotel|holiday inn|best western|accor|melia|sheraton|wyndham|radisson|intercontinental|four seasons/i.test(p.name));
+    // Build Google Maps direct link
+    var mapsLink = p.link || p.mapsUrl;
+    if (!mapsLink) {
+      if (p.placeId) mapsLink = "https://www.google.com/maps/place/?q=place_id:" + p.placeId;
+      else mapsLink = "https://www.google.com/maps/search/" + encodeURIComponent((p.title||dest));
+    }
     return {
       platform:  "google",
       name:      p.title||p.name||"",
@@ -283,9 +459,9 @@ async function searchGoogleMaps(dest, mode, req, keys) {
       is_private:    !p.website || siteLevel==="none" || siteLevel==="builder",
       owner_managed: !p.website || siteLevel==="none",
       no_agency:     mode!=="agenzie",
-      chain_hotel:   !!(p.name && /marriott|hilton|hyatt|ibis|nh hotel|holiday inn|best western|accor|melia/i.test(p.name)),
+      chain_hotel:   isChain,
       booking_engine_advanced: siteLevel==="professional" && (p.reviews||0)>300,
-      src:       p.link||("https://www.google.com/maps/search/"+encodeURIComponent(p.title||dest)),
+      src:       mapsLink,
     };
   });
 }
@@ -322,48 +498,81 @@ async function searchInstagram(dest, keys) {
 }
 
 async function searchFacebook(dest, keys) {
-  var runId = await apifyRun("apify~facebook-pages-scraper",{
-    startUrls:[{url:"https://www.facebook.com/search/pages/?q=affitti+vacanze+"+encodeURIComponent(dest)}],
-    maxPosts:0
-  },keys.apify);
-  var dsId  = await apifyWait(runId, keys.apify);
-  var items = await apifyItems(dsId, keys.apify, 15);
-  return items.filter(function(i){return i.name||i.title;}).map(function(item) {
-    var ct = extractContacts((item.phone||"")+" "+(item.email||"")+" "+(item.about||""));
-    return {
-      platform:  "facebook",
-      name:      item.name||item.title||"",
-      type:      "Pagina Facebook",
-      location:  dest,
-      website:   item.website||null,
-      phone:     item.phone||ct.phone||null,
-      email:     item.email||ct.email||null,
-      whatsapp:  ct.whatsapp,
-      is_private:    false,
-      owner_managed: false,
-      no_agency:     false,
-      src: item.url||item.pageUrl||"",
-    };
-  });
+  // Search for rental pages and groups
+  var queries = [
+    "affitti vacanze " + dest,
+    "case vacanze " + dest,
+    "villa rental " + dest,
+  ];
+  var all = [], seen = {};
+  for (var qi = 0; qi < queries.length; qi++) {
+    try {
+      var runId = await apifyRun("apify~facebook-pages-scraper",{
+        startUrls:[{
+          url: "https://www.facebook.com/search/pages/?q=" + encodeURIComponent(queries[qi])
+        }],
+        maxPosts: 3,
+        maxReviews: 0,
+      }, keys.apify);
+      var dsId = await apifyWait(runId, keys.apify);
+      var items = await apifyItems(dsId, keys.apify, 10);
+      items.filter(function(i){return i.name||i.title;}).forEach(function(item) {
+        var k = (item.name||item.title||"").toLowerCase().replace(/\s/g,"");
+        if (seen[k]) return; seen[k]=true;
+        var ct = extractContacts((item.phone||"")+" "+(item.email||"")+" "+(item.about||"")+" "+(item.description||""));
+        all.push({
+          platform:  "facebook",
+          name:      item.name||item.title||"",
+          type:      "Pagina Facebook",
+          location:  item.city||dest,
+          website:   item.website||null,
+          phone:     item.phone||ct.phone||null,
+          email:     item.email||ct.email||null,
+          whatsapp:  ct.whatsapp,
+          is_private:    false,
+          owner_managed: false,
+          no_agency:     false,
+          src: item.url||item.pageUrl||"",
+        });
+      });
+      if (all.length >= 10) break;
+    } catch(e) {}
+  }
+  return all;
 }
 
 async function searchTelegramPublic(dest) {
   var slug = normKey(dest).replace(/_/g,"");
   var channels = TELEGRAM_MAP[slug] || TELEGRAM_MAP.default;
   var all = [];
-  for (var i = 0; i < Math.min(channels.length, 3); i++) {
+  for (var i = 0; i < Math.min(channels.length, 4); i++) {
     try {
       var url = "https://t.me/s/" + channels[i];
       var items = await fetchScrape(url, "telegram");
-      all = all.concat(items);
+      // Add channel info + proper telegram links
+      items.forEach(function(item) {
+        item.telegram_channel = channels[i];
+        item.channel_url = "https://t.me/" + channels[i];
+        // If we have a message ID, link directly to it
+        if (item.msg_id) {
+          item.src = "https://t.me/" + channels[i] + "/" + item.msg_id;
+        } else {
+          item.src = "https://t.me/s/" + channels[i];
+        }
+        all.push(item);
+      });
     } catch(e) {}
   }
   return all;
 }
 
 async function searchMediaVacanze(dest, req) {
-  var slug = encodeURIComponent(dest);
-  var url = "https://www.mediavacanze.com/case-vacanze.php?pays=&region=&ville=" + slug;
+  // MediaVacanze supports multiple languages — try both search endpoints
+  var encoded = encodeURIComponent(dest);
+  var country = detectCountry(dest);
+  var countryCode = country === "es" ? "es" : country === "gr" ? "gr" : "it";
+  // Primary: text search URL
+  var url = "https://www.mediavacanze.com/affitto-vacanze.php?search=" + encoded;
   return fetchScrape(url, "mediavacanze");
 }
 
@@ -375,15 +584,41 @@ async function searchSubito(dest, req) {
 
 async function searchIdealista(dest, req) {
   var slug = normKey(dest).replace(/_/g,"-");
-  var url = "https://www.idealista.it/affitto-case/" + slug + "/";
+  var country = detectCountry(dest);
+  var url;
+  if (country === "es") {
+    // Spain: idealista.com/alquiler-viviendas/
+    url = "https://www.idealista.com/alquiler-viviendas/" + slug + "-islas-baleares/";
+    // Fallback for known slugs
+    if (slug === "ibiza") url = "https://www.idealista.com/alquiler-viviendas/ibiza-islas-baleares/";
+    else if (slug === "formentera") url = "https://www.idealista.com/alquiler-viviendas/formentera-islas-baleares/";
+  } else {
+    url = "https://www.idealista.it/affitto-case/" + slug + "/";
+  }
   return fetchScrape(url, "idealista");
 }
 
 async function searchImmobiliare(dest, keys) {
-  // Scraping diretto — no actor a pagamento
   var slug = normKey(dest).replace(/_/g,"-");
-  var url = "https://www.immobiliare.it/affitto-case/" + slug + "/?localiMinimo=1";
-  return fetchScrape(url, "immobiliare");
+  var country = detectCountry(dest);
+  var url, platform;
+  if (country === "es") {
+    // Spain: use fotocasa.es instead
+    if (slug === "ibiza") {
+      url = "https://www.fotocasa.es/es/alquiler/viviendas/ibiza/todas-las-zonas/l";
+    } else {
+      url = "https://www.fotocasa.es/es/alquiler/viviendas/" + slug + "/todas-las-zonas/l";
+    }
+    platform = "fotocasa";
+  } else if (country === "gr") {
+    // Greece: use spitogatos
+    url = "https://www.spitogatos.gr/en/rent/apartments/" + slug;
+    platform = "spitogatos";
+  } else {
+    url = "https://www.immobiliare.it/affitto-case/" + slug + "/?localiMinimo=1";
+    platform = "immobiliare";
+  }
+  return fetchScrape(url, platform);
 }
 
 // ─── RUN SEARCH ───────────────────────────────────────────────────────────────
@@ -456,7 +691,23 @@ async function runSearch(dest, mode, req, keys, onLog) {
     }
     return b.score - a.score;
   });
-  return all;
+
+  // ── AGENT v4: Enrich leads missing contacts ──────────────────────────────
+  var enriched = await runEnrichment(all, keys, onLog);
+
+  // Re-score after enrichment (new contacts may change score)
+  enriched = enriched.map(function(s) {
+    if (!s.enriched) return s;
+    var sc = computeScore(s, req);
+    return Object.assign({}, s, {
+      score: sc.score, priority: sc.priority,
+      scoreReason: sc.reasons.slice(0,4).join(" · "),
+      scoreFlags: sc.flags, matchReasons: sc.matchReasons,
+    });
+  });
+  enriched.sort(function(a,b) { return b.score-a.score; });
+
+  return enriched;
 }
 
 // ─── COMPONENTS ───────────────────────────────────────────────────────────────
@@ -572,10 +823,12 @@ function LeadCard(props) {
             {s.type&&<span style={{fontSize:10,color:"#6B7280"}}>{s.type}</span>}
             {s.is_private&&<span style={{fontSize:10,padding:"2px 6px",borderRadius:20,
               background:"rgba(52,211,153,0.1)",border:"1px solid rgba(52,211,153,0.25)",color:"#34D399"}}>privato</span>}
+            {s.enriched&&<span style={{fontSize:10,padding:"2px 6px",borderRadius:20,
+              background:"rgba(139,92,246,0.1)",border:"1px solid rgba(139,92,246,0.3)",color:"#A78BFA"}}>✦ arricchito</span>}
             {s.priority==="HIGH"&&<span style={{fontSize:10,padding:"2px 6px",borderRadius:20,
               background:"rgba(52,211,153,0.15)",color:"#34D399",fontWeight:700}}>HIGH</span>}
           </div>
-          <div style={{fontSize:15,fontWeight:700,color:"#F9FAFB",marginBottom:3,
+          <div className="lx-card-name" style={{fontSize:15,fontWeight:700,color:"#F9FAFB",marginBottom:3,
             overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{s.name}</div>
           <div style={{fontSize:10,color:"#6B7280",display:"flex",gap:8,flexWrap:"wrap"}}>
             {s.location&&<span>📍 {s.location}</span>}
@@ -605,15 +858,23 @@ function LeadCard(props) {
           <div style={{marginBottom:10}}>
             {s.whatsapp&&<Chip icon="💬" label={s.whatsapp}
               href={"https://wa.me/"+s.whatsapp.replace(/[^0-9+]/g,"")} c="#34D399"/>}
-            {s.phone&&!s.whatsapp&&<Chip icon="📞" label={s.phone}
-              href={"tel:"+s.phone} c="#FBBF24"/>}
+            {s.phone&&(
+              <span>
+                <Chip icon="📞" label={s.phone}
+                  href={"tel:"+s.phone} c="#FBBF24"/>
+                <Chip icon="💬 WA" label="Apri WA"
+                  href={"https://wa.me/"+s.phone.replace(/[^0-9+]/g,"")} c="#25D366"/>
+              </span>
+            )}
             {s.email&&<Chip icon="✉" label={s.email}
               href={"mailto:"+s.email} c="#60A5FA"/>}
             {s.instagram&&<Chip icon="📸" label={s.instagram}
               href={"https://instagram.com/"+s.instagram.replace("@","")} c="#E1306C"/>}
+            {s.telegram_channel&&<Chip icon="✈" label={"@"+s.telegram_channel}
+              href={s.channel_url||("https://t.me/"+s.telegram_channel)} c="#26A5E4"/>}
             {s.website&&<Chip icon="🔗" label={s.website.replace(/^https?:\/\//,"").split("/")[0]}
               href={s.website} c="#C084FC"/>}
-            {s.src&&<Chip icon="📋" label="Scheda"
+            {s.src&&<Chip icon="📋" label={s.platform==="telegram"?"Vai al post":"Scheda"}
               href={s.src} c="#6B7280"/>}
           </div>
 
@@ -672,7 +933,7 @@ function LeadCard(props) {
 
           {/* Messages */}
           {msgs&&(
-            <div style={{marginTop:10,display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+            <div className="lx-msg-grid" style={{marginTop:10,display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
               <div style={{padding:10,background:"rgba(52,211,153,0.06)",
                 border:"1px solid rgba(52,211,153,0.18)",borderRadius:9}}>
                 <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
@@ -777,7 +1038,7 @@ function ResultsView(props) {
   return (
     <div style={{marginTop:8,width:"100%"}}>
       {/* Stats */}
-      <div style={{display:"flex",gap:8,marginBottom:12,flexWrap:"wrap",alignItems:"center"}}>
+      <div className="lx-stats" style={{display:"flex",gap:8,marginBottom:12,flexWrap:"wrap",alignItems:"center"}}>
         {[
           {l:"Lead",      v:leads.length, c:"#9CA3AF"},
           {l:"HIGH",      v:high,         c:"#34D399"},
@@ -785,9 +1046,9 @@ function ResultsView(props) {
           {l:"Email",     v:hasEM,        c:"#60A5FA"},
         ].map(function(st,i){
           return (
-            <div key={i} style={{padding:"6px 12px",borderRadius:10,
+            <div key={i} className="lx-stat" style={{padding:"6px 12px",borderRadius:10,
               background:"rgba(255,255,255,0.03)",border:"1px solid rgba(255,255,255,0.08)",textAlign:"center"}}>
-              <div style={{fontSize:20,fontWeight:800,color:st.c}}>{st.v}</div>
+              <div className="lx-stat-num" style={{fontSize:20,fontWeight:800,color:st.c}}>{st.v}</div>
               <div style={{fontSize:9,color:"#4B5563",textTransform:"uppercase",letterSpacing:"0.06em"}}>{st.l}</div>
             </div>
           );
@@ -801,7 +1062,7 @@ function ResultsView(props) {
       </div>
 
       {/* Filters */}
-      <div style={{display:"flex",gap:7,marginBottom:12,flexWrap:"wrap"}}>
+      <div className="lx-filters" style={{display:"flex",gap:7,marginBottom:12,flexWrap:"wrap"}}>
         <input value={search} onChange={function(e){setSearch(e.target.value);}}
           placeholder="Cerca per nome o location..."
           style={{flex:1,minWidth:140,padding:"6px 12px",borderRadius:8,
@@ -1110,59 +1371,76 @@ export default function App() {
         "@keyframes fadeUp{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}} " +
         "html,body,#root{margin:0;padding:0;border:0;background:#09090B;} " +
         "textarea:focus,input:focus,select:focus{outline:none} " +
-        "::-webkit-scrollbar{width:4px} ::-webkit-scrollbar-thumb{background:#BE185D;border-radius:2px} " +
-        "*{box-sizing:border-box}"
+        "::-webkit-scrollbar{width:3px} ::-webkit-scrollbar-thumb{background:#BE185D;border-radius:2px} " +
+        "*{box-sizing:border-box} " +
+        "@media(max-width:640px){" +
+          ".lx-header{padding:8px 12px !important;}" +
+          ".lx-modes{padding:5px 10px !important;}" +
+          ".lx-messages{padding:10px 10px !important;}" +
+          ".lx-input{padding:8px 10px 12px !important;}" +
+          ".lx-logo{width:28px !important;height:28px !important;}" +
+          ".lx-title{font-size:13px !important;}" +
+          ".lx-sub{display:none !important;}" +
+          ".lx-btn-text{display:none !important;}" +
+          ".lx-card-name{font-size:13px !important;}" +
+          ".lx-card-row{flex-direction:column !important;gap:6px !important;}" +
+          ".lx-stats{gap:5px !important;}" +
+          ".lx-stat{min-width:60px !important;padding:5px 8px !important;}" +
+          ".lx-stat-num{font-size:16px !important;}" +
+          ".lx-filters{flex-wrap:wrap !important;}" +
+          ".lx-msg-grid{grid-template-columns:1fr !important;}" +
+        "}"
       }}/>
 
       {showSettings&&<SettingsModal keys={apiKeys} onSave={saveKeys} onClose={function(){setShowSettings(false);}}/>}
       {showLog&&<LogPanel logs={logs} onClose={function(){setShowLog(false);}}/>}
 
       {/* HEADER */}
-      <div style={{borderBottom:"1px solid rgba(236,72,153,0.15)",padding:"14px 20px",
-        display:"flex",alignItems:"center",gap:10,background:"#09090B",
+      <div className="lx-header" style={{borderBottom:"1px solid rgba(236,72,153,0.15)",
+        padding:"10px 12px",display:"flex",alignItems:"center",gap:8,background:"#09090B",
         position:"sticky",top:0,zIndex:100,flexShrink:0}}>
-        <div style={{width:42,height:42,borderRadius:10,background:"#000",
+        <div className="lx-logo" style={{width:32,height:32,borderRadius:8,background:"#000",
           border:"1.5px solid rgba(236,72,153,0.45)",display:"flex",alignItems:"center",
-          justifyContent:"center",boxShadow:"0 0 14px rgba(236,72,153,0.18)"}}>
-          <span style={{fontSize:12,fontWeight:900,fontFamily:"Georgia,serif",color:"#fff"}}>
+          justifyContent:"center",flexShrink:0,boxShadow:"0 0 12px rgba(236,72,153,0.18)"}}>
+          <span style={{fontSize:11,fontWeight:900,fontFamily:"Georgia,serif",color:"#fff"}}>
             Lu<span style={{color:"#EC4899"}}>X</span>y
           </span>
         </div>
-        <div>
-          <div style={{fontSize:17,fontWeight:800,fontFamily:"Georgia,serif"}}>
+        <div style={{minWidth:0}}>
+          <div className="lx-title" style={{fontSize:14,fontWeight:800,fontFamily:"Georgia,serif",whiteSpace:"nowrap"}}>
             Lu<span style={{color:"#EC4899"}}>X</span>y <span style={{color:"#4B5563",fontWeight:300}}>Club</span>
           </div>
-          <div style={{fontSize:10,color:"#374151",textTransform:"uppercase",letterSpacing:"0.1em"}}>
+          <div className="lx-sub" style={{fontSize:9,color:"#374151",textTransform:"uppercase",letterSpacing:"0.1em"}}>
             AI Partner Discovery
           </div>
         </div>
-        <div style={{marginLeft:"auto",display:"flex",gap:7,alignItems:"center"}}>
+        <div style={{marginLeft:"auto",display:"flex",gap:5,alignItems:"center",flexShrink:0}}>
           <button onClick={function(){setShowLog(function(o){return !o;});}}
-            style={{fontSize:11,padding:"5px 12px",borderRadius:20,cursor:"pointer",fontWeight:700,
+            style={{fontSize:10,padding:"4px 8px",borderRadius:20,cursor:"pointer",fontWeight:700,
               background:hasErrors?"rgba(248,113,113,0.15)":"rgba(255,255,255,0.06)",
               border:"1px solid "+(hasErrors?"rgba(248,113,113,0.4)":"rgba(255,255,255,0.12)"),
               color:hasErrors?"#F87171":"#6B7280"}}>
-            {showLog?"✕":"🔍"} Log{logs.length>0?" ("+logs.length+")":""}
+            {showLog?"✕":"🔍"}<span className="lx-btn-text">{logs.length>0?" ("+logs.length+")":""}</span>
           </button>
           <button onClick={function(){setShowSettings(true);}}
-            style={{fontSize:11,padding:"6px 14px",borderRadius:20,cursor:"pointer",fontWeight:600,
+            style={{fontSize:10,padding:"4px 10px",borderRadius:20,cursor:"pointer",fontWeight:600,
               background:hasKeys?"rgba(52,211,153,0.12)":"rgba(251,191,36,0.12)",
               border:"1px solid "+(hasKeys?"rgba(52,211,153,0.35)":"rgba(251,191,36,0.35)"),
               color:hasKeys?"#34D399":"#F59E0B"}}>
-            {hasKeys?"⚙ API attive":"⚠ Configura API"}
+            {hasKeys?"⚙":"⚠"}<span className="lx-btn-text"> {hasKeys?"API":"Configura"}</span>
           </button>
         </div>
       </div>
 
       {/* MODE SELECTOR */}
-      <div style={{padding:"10px 20px",borderBottom:"1px solid rgba(255,255,255,0.05)",
-        background:"#0A0A0F",flexShrink:0}}>
-        <div style={{display:"flex",gap:5,maxWidth:720,margin:"0 auto"}}>
+      <div className="lx-modes" style={{padding:"6px 12px",borderBottom:"1px solid rgba(255,255,255,0.05)",
+        background:"#0A0A0F",flexShrink:0,overflowX:"auto"}}>
+        <div style={{display:"flex",gap:4,maxWidth:720,margin:"0 auto",width:"max-content",minWidth:"100%"}}>
           {SEARCH_MODES.map(function(m) {
             var isA = searchMode===m.id;
             return (
               <button key={m.id} onClick={function(){setSearchMode(m.id);}}
-                style={{fontSize:13,padding:"7px 16px",borderRadius:9,
+                style={{fontSize:11,padding:"5px 10px",borderRadius:8,whiteSpace:"nowrap",
                   border:"1px solid "+(isA?"rgba(236,72,153,0.5)":"rgba(255,255,255,0.07)"),
                   background:isA?"rgba(236,72,153,0.14)":"transparent",
                   color:isA?"#F472B6":"#6B7280",cursor:"pointer",fontWeight:isA?700:400}}>
@@ -1174,13 +1452,13 @@ export default function App() {
       </div>
 
       {/* MESSAGES */}
-      <div style={{flex:1,overflowY:"auto",padding:"20px 18px"}}>
+      <div className="lx-messages" style={{flex:1,overflowY:"auto",padding:"14px 12px"}}>
         <div style={{maxWidth:720,margin:"0 auto"}}>
 
           {/* Empty state */}
           {!msgs.length&&(
             <div style={{animation:"fadeUp 0.4s ease"}}>
-              <div style={{textAlign:"center",padding:"24px 0 20px"}}>
+              <div style={{textAlign:"center",padding:"16px 0 12px"}}>
                 <div style={{width:62,height:62,borderRadius:14,background:"#000",
                   border:"2px solid rgba(236,72,153,0.3)",display:"flex",alignItems:"center",
                   justifyContent:"center",margin:"0 auto 12px",boxShadow:"0 0 28px rgba(236,72,153,0.1)"}}>
@@ -1273,28 +1551,28 @@ export default function App() {
       </div>
 
       {/* INPUT */}
-      <div style={{borderTop:"1px solid rgba(236,72,153,0.12)",
-        padding:"14px 18px 18px",background:"#09090B",flexShrink:0}}>
-        <div style={{maxWidth:720,margin:"0 auto",display:"flex",gap:8,alignItems:"flex-end"}}>
+      <div className="lx-input" style={{borderTop:"1px solid rgba(236,72,153,0.12)",
+        padding:"9px 10px 12px",background:"#09090B",flexShrink:0}}>
+        <div style={{maxWidth:720,margin:"0 auto",display:"flex",gap:6,alignItems:"flex-end"}}>
           <textarea ref={inpRef} value={input}
             onChange={function(e){setInput(e.target.value);}}
             onKeyDown={handleKey}
-            placeholder="Es: Ibiza villa privata luglio agosto budget 3000 settimana · oppure solo: Mykonos"
+            placeholder="Ibiza villa luglio agosto · oppure: Mykonos"
             rows={2} disabled={busy}
             style={{flex:1,background:"rgba(255,255,255,0.05)",
-              border:"1px solid rgba(236,72,153,0.2)",borderRadius:12,
-              padding:"12px 16px",color:"#F9FAFB",fontSize:14,resize:"none",
+              border:"1px solid rgba(236,72,153,0.2)",borderRadius:10,
+              padding:"8px 11px",color:"#F9FAFB",fontSize:13,resize:"none",
               fontFamily:"inherit",lineHeight:1.5,opacity:busy?0.5:1}}/>
           <button onClick={send} disabled={busy||!input.trim()}
-            style={{width:46,height:46,borderRadius:12,border:"none",
+            style={{width:40,height:40,borderRadius:10,border:"none",
               background:busy||!input.trim()?"rgba(236,72,153,0.1)":"linear-gradient(135deg,#9D174D,#EC4899)",
-              color:"#fff",fontSize:18,cursor:busy||!input.trim()?"not-allowed":"pointer",
+              color:"#fff",fontSize:17,cursor:busy||!input.trim()?"not-allowed":"pointer",
               flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
             {busy?"⏳":"↑"}
           </button>
         </div>
-        <div style={{maxWidth:720,margin:"4px auto 0",fontSize:11,color:"#374151",textAlign:"center"}}>
-          "8 canali reali · Google Maps · Instagram · MediaVacanze · Subito.it · Idealista · Telegram · Facebook · Immobiliare.it"
+        <div style={{maxWidth:720,margin:"3px auto 0",fontSize:10,color:"#374151",textAlign:"center"}}>
+          8 canali · Google Maps · Instagram · MediaVacanze · Subito · Idealista · Telegram · Facebook
         </div>
       </div>
     </div>

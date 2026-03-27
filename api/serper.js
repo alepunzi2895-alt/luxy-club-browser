@@ -19,15 +19,28 @@ export default async function handler(req, res) {
   }
   const cleanKey = KEY.trim();
 
+  // Detect country from query for correct gl param
+  const q = query.toLowerCase();
+  const isSpain = ["ibiza","formentera","mallorca","barcellona","madrid","valencia","tenerife","marbella","menorca"].some(w => q.includes(w));
+  const isGreece = ["mykonos","santorini","creta","rodi","corfu","atene"].some(w => q.includes(w));
+  const gl = isSpain ? "es" : isGreece ? "gr" : "it";
+  const hl = isSpain ? "es" : "it";
+  const endpoint = req.body.type === "search" ? "https://google.serper.dev/search" : "https://google.serper.dev/maps";
+
   try {
-    const r = await fetch("https://google.serper.dev/maps", {
+    const r = await fetch(endpoint, {
       method: "POST",
       headers: { "X-API-KEY": cleanKey, "Content-Type": "application/json" },
-      body: JSON.stringify({ q: query, gl: "it", hl: "it", num: 20 }),
+      body: JSON.stringify({ q: query, gl, hl, num: 20 }),
     });
+    if (!r.ok) {
+      const errText = await r.text();
+      console.error("Serper error:", r.status, errText);
+      return res.status(r.status).json({ error: "Serper " + r.status + ": " + errText.slice(0,200), places: [] });
+    }
     const data = await r.json();
-    res.status(r.status).json(data);
+    res.status(200).json(data);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: err.message, places: [] });
   }
 }
