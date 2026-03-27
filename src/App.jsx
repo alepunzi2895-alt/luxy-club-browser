@@ -23,6 +23,7 @@ var PLATFORMS = {
   subito:      { label:"Subito.it",      color:"#CC0000" },
   idealista:   { label:"Idealista",      color:"#003399" },
   immobiliare: { label:"Immobiliare.it", color:"#0E4CB2" },
+  airbnb:      { label:"Airbnb",         color:"#FF5A5F" },
   homeaway:    { label:"VRBO",           color:"#2196F3" },
   vrbo:        { label:"VRBO",           color:"#2196F3" },
 };
@@ -115,19 +116,52 @@ function extractContacts(text) {
   };
 }
 
+// ─── AIRBNB via APIFY ────────────────────────────────────────────────────────
+async function searchAirbnbApify(dest, keys) {
+  // apify/airbnb-scraper — official Apify actor, free tier
+  var cin  = new Date(Date.now()+30*86400000).toISOString().split("T")[0];
+  var cout = new Date(Date.now()+37*86400000).toISOString().split("T")[0];
+  var runId = await apifyRun("apify~airbnb-scraper", {
+    locationQueries: [dest],
+    checkIn:  cin,
+    checkOut: cout,
+    adults: 2,
+    maxListings: 20,
+    currency: "EUR",
+    includeReviews: false,
+  }, keys.apify||"");
+  var dsId  = await apifyWait(runId, keys.apify||"");
+  var items = await apifyItems(dsId, keys.apify||"", 20);
+  return items.filter(function(i){return i.name||i.title;}).map(function(item) {
+    var rev = parseInt(item.reviewsCount||item.numberOfReviews||0);
+    var rat = parseFloat(item.starRating||item.avgRating||0);
+    return {
+      platform: "airbnb",
+      name:     item.name||item.title||"",
+      type:     item.roomType||item.propertyType||"Appartamento",
+      location: item.city||item.locationTitle||dest,
+      price:    item.price ? item.price+"€/notte" : "",
+      rating:   rat>0?rat:null,
+      reviews:  rev>0?rev:null,
+      is_private:    rev<150||item.isSuperhost,
+      owner_managed: !item.isProfessionalHost,
+      new_listing:   rev<10,
+      src: item.url||("https://www.airbnb.com/rooms/"+(item.id||"")),
+    };
+  });
+}
+
 // ─── VRBO SEARCH ─────────────────────────────────────────────────────────────
 async function searchVRBO(dest, keys) {
   // decorative_chimta/vrbo-main-link-scraper — free Apify actor
-  var cin  = new Date(Date.now()+30*86400000).toISOString().split("T")[0];
-  var cout = new Date(Date.now()+37*86400000).toISOString().split("T")[0];
+  var cin  = new Date(Date.now()+60*86400000).toISOString().split("T")[0];
+  var cout = new Date(Date.now()+67*86400000).toISOString().split("T")[0];
+  // VRBO search URL format
+  var vrboUrl = "https://www.vrbo.com/search?destination=" +
+    encodeURIComponent(dest) +
+    "&adultsCount=2&startDate=" + cin + "&endDate=" + cout;
   var runId = await apifyRun("decorative_chimta~vrbo-main-link-scraper", {
-    startUrls: [{
-      url: "https://www.vrbo.com/search/keywords:" +
-        encodeURIComponent(dest) +
-        "/arrival:" + cin +
-        "/departure:" + cout +
-        "/adults-2/?adultsCount=2&neLat=90&neLong=180&swLat=-90&swLong=-180"
-    }],
+    url: vrboUrl,
     maxItems: 20,
   }, keys.apify||"");
   var dsId  = await apifyWait(runId, keys.apify||"");
@@ -662,29 +696,47 @@ async function searchMediaVacanze(dest, req) {
 
 async function searchSubito(dest, keys) {
   // nogards95/subito-scraper — free Apify actor
-  var runId = await apifyRun("nogards95~subito-scraper", {
-    keyword: dest + " affitto vacanze",
-    maxResults: 20,
+  // Use apify/cheerio-scraper (free, always available) to scrape Subito search page
+  var searchUrl = "https://www.subito.it/annunci-italia/affitto-vacanze/case-vacanza/?q=" + encodeURIComponent(dest);
+  var runId = await apifyRun("apify~cheerio-scraper", {
+    startUrls: [{ url: searchUrl }],
+    pageFunction: `async function pageFunction(context) {
+      const { $, request } = context;
+      const items = [];
+      $('[data-item-id]').each(function() {
+        const el = $(this);
+        const title = el.find('[class*="title"]').first().text().trim();
+        const price = el.find('[class*="price"]').first().text().trim();
+        const link  = el.find('a').first().attr('href');
+        const phone = el.find('[class*="phone"]').first().text().trim();
+        if (title || price) {
+          items.push({ title, price, phone,
+            url: link ? ('https://www.subito.it' + link) : request.url });
+        }
+      });
+      return items;
+    }`,
+    maxRequestsPerCrawl: 1,
   }, keys.apify||"");
   var dsId  = await apifyWait(runId, keys.apify||"");
   var items = await apifyItems(dsId, keys.apify||"", 20);
-  return items.filter(function(i){return i.title||i.subject||i.name;}).map(function(item) {
-    var ct = extractContacts((item.body||"")+" "+(item.description||"")+" "+(item.phone||""));
-    var isPrivate = !item.advertiser || item.advertiser.type !== "agency";
+  // Flatten nested results
+  var flat = [];
+  items.forEach(function(item) {
+    if (Array.isArray(item)) flat = flat.concat(item);
+    else if (item.title || item.price) flat.push(item);
+  });
+  return flat.filter(function(i){return i.title||i.price;}).map(function(item) {
+    var ct = extractContacts((item.phone||"")+" "+(item.description||""));
     return {
       platform: "subito",
-      name:     item.title||item.subject||item.name||"Annuncio Subito",
-      type:     (item.category && item.category.friendly_name) || "Affitto vacanze",
-      location: (item.geo && (item.geo.city && item.geo.city.value||item.geo.region&&item.geo.region.value)) || dest,
-      price:    item.price || (item.features&&item.features.find&&(function(){var p=item.features.find(function(f){return f["-id"]==="price";});return p?p.values[0].value:"";})()) || "",
+      name:     item.title||"Annuncio Subito",
+      type:     "Affitto vacanze",
+      price:    item.price||"",
       phone:    item.phone||ct.phone||null,
-      email:    ct.email,
-      whatsapp: ct.whatsapp,
-      is_private:    isPrivate,
-      owner_managed: isPrivate,
-      no_agency:     isPrivate,
-      new_listing:   !!(item.date && new Date(item.date) > new Date(Date.now()-30*86400000)),
-      src: item.urls&&item.urls.default || item.url || "https://www.subito.it",
+      email:    ct.email, whatsapp: ct.whatsapp,
+      is_private: true, owner_managed: true, no_agency: true,
+      src: item.url||searchUrl,
     };
   });
 }
@@ -721,9 +773,11 @@ async function searchImmobiliare(dest, keys) {
   if (country === "it" || country === "id") {
     try {
       var runId = await apifyRun("igolaizola~immobiliare-it-scraper", {
-        search: dest,
-        maxResults: 20,
-        type: "affitto",
+        startUrls: [{
+          url: "https://www.immobiliare.it/affitto-case/" +
+            normKey(dest).replace(/_/g,"-") + "/?localiMinimo=1"
+        }],
+        maxItems: 20,
       }, keys.apify||"");
       var dsId  = await apifyWait(runId, keys.apify||"");
       var items = await apifyItems(dsId, keys.apify||"", 20);
@@ -808,13 +862,14 @@ async function runSearch(dest, mode, req, keys, onLog) {
     tasks.push(wrap("Telegram",     function(){return searchTelegramPublic(dest);}));
   }
 
-  // Apify actors — tutti usano env var APIFY_TOKEN come fallback
+  // Apify actors — usano APIFY_TOKEN da env var come fallback
   if (IS_VERCEL) {
     tasks.push(wrap("Instagram",    function(){return searchInstagram(dest,keys);}));
     tasks.push(wrap("Facebook",     function(){return searchFacebook(dest,keys);}));
     tasks.push(wrap("Immobiliare",  function(){return searchImmobiliare(dest,keys);}));
     tasks.push(wrap("Subito.it",    function(){return searchSubito(dest,keys);}));
     tasks.push(wrap("VRBO",         function(){return searchVRBO(dest,keys);}));
+    tasks.push(wrap("Airbnb",       function(){return searchAirbnbApify(dest,keys);}));
   }
 
   if (!tasks.length) throw new Error("Nessun canale disponibile. Configura le API key.");
