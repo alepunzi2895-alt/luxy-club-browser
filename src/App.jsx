@@ -23,6 +23,8 @@ var PLATFORMS = {
   subito:      { label:"Subito.it",      color:"#CC0000" },
   idealista:   { label:"Idealista",      color:"#003399" },
   immobiliare: { label:"Immobiliare.it", color:"#0E4CB2" },
+  homeaway:    { label:"VRBO",           color:"#2196F3" },
+  vrbo:        { label:"VRBO",           color:"#2196F3" },
 };
 
 var TELEGRAM_MAP = {
@@ -113,6 +115,37 @@ function extractContacts(text) {
   };
 }
 
+// ─── VRBO SEARCH ─────────────────────────────────────────────────────────────
+async function searchVRBO(dest, keys) {
+  // decorative_chimta/vrbo-main-link-scraper — free Apify actor
+  var runId = await apifyRun("decorative_chimta~vrbo-main-link-scraper", {
+    location: dest,
+    checkIn:  new Date(Date.now()+30*86400000).toISOString().split("T")[0],
+    checkOut: new Date(Date.now()+37*86400000).toISOString().split("T")[0],
+    adults: 2,
+    maxItems: 20,
+  }, keys.apify||"");
+  var dsId  = await apifyWait(runId, keys.apify||"");
+  var items = await apifyItems(dsId, keys.apify||"", 20);
+  return items.filter(function(i){return i.name||i.title;}).map(function(item) {
+    var rev = parseInt(item.reviewCount||item.reviews||0);
+    var rat = parseFloat(item.rating||item.avgRating||0);
+    return {
+      platform:  "homeaway",
+      name:      item.name||item.title||"",
+      type:      item.type||item.propertyType||"Villa / Casa vacanze",
+      location:  item.city||item.location||dest,
+      price:     item.price ? "~"+item.price+"€/notte" : "",
+      rating:    rat>0?rat:null,
+      reviews:   rev>0?rev:null,
+      is_private:    rev<100,
+      owner_managed: !item.manager && rev<100,
+      new_listing:   rev<10,
+      src: item.url||item.listingUrl||"https://www.vrbo.com",
+    };
+  });
+}
+
 // ─── AGENT v4: ENRICHMENT LOOP ───────────────────────────────────────────────
 // For leads missing email/whatsapp, try to find them by:
 // 1. Scraping the lead's website /contact page
@@ -147,29 +180,62 @@ async function enrichLead(lead, serperKey) {
     }
   }
 
-  // Step 2: Google search for missing contacts
+  // Step 2: Google search for missing contacts (email, phone, WA, website)
   if ((!found.email && !found.whatsapp) && (IS_VERCEL || serperKey) && lead.name) {
     try {
-      var query = lead.name + " " + (lead.location||"") + " email whatsapp contact";
-      var res2 = await fetch("/api/serper", {
-        method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ query: query, serperKey: serperKey||"", type: "search" })
-      });
-      if (res2.ok) {
-        var sd = await res2.json();
-        var snippets = (sd.organic||[]).slice(0,3).map(function(r){
-          return (r.snippet||"") + " " + (r.link||"");
-        }).join(" ");
-        var ct2 = extractContacts(snippets);
-        if (ct2.email)    found.email    = found.email    || ct2.email;
-        if (ct2.whatsapp) found.whatsapp  = found.whatsapp || ct2.whatsapp;
-        if (ct2.phone)    found.phone    = found.phone    || ct2.phone;
-        // Also check if any result has a website we haven't scraped
-        if (!lead.website && sd.organic && sd.organic[0]) {
-          enriched.website = sd.organic[0].link;
+      var queries = [
+        lead.name + " " + (lead.location||"") + " whatsapp email contatti",
+        lead.name + " " + (lead.location||"") + " telefono prenotazioni",
+      ];
+      for (var qi2=0; qi2<queries.length; qi2++) {
+        var res2 = await fetch("/api/serper", {
+          method:"POST", headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({ query: queries[qi2], serperKey: serperKey||"", type: "search" })
+        });
+        if (res2.ok) {
+          var sd = await res2.json();
+          // Extract from snippets
+          var snippets = (sd.organic||[]).slice(0,4).map(function(r){
+            return (r.snippet||"") + " " + (r.link||"");
+          }).join(" ");
+          var ct2 = extractContacts(snippets);
+          if (ct2.email)    found.email    = found.email    || ct2.email;
+          if (ct2.whatsapp) found.whatsapp  = found.whatsapp || ct2.whatsapp;
+          if (ct2.phone)    found.phone    = found.phone    || ct2.phone;
+          // Save first organic result as website if none
+          if (!lead.website && sd.organic && sd.organic[0]) {
+            var firstLink = sd.organic[0].link;
+            // Only use if not a big OTA
+            if (!/airbnb|booking|tripadvisor|vrbo|homeaway/i.test(firstLink)) {
+              enriched.website = firstLink;
+            }
+          }
+          if (found.email || found.whatsapp) break;
         }
       }
     } catch(e) {}
+  }
+
+  // Step 3: If we found a website but no contacts, scrape it too
+  if (enriched.website && !found.email && !found.whatsapp) {
+    var contactPages2 = [
+      enriched.website.replace(/\/$/, "") + "/contact",
+      enriched.website.replace(/\/$/, "") + "/contatti",
+    ];
+    for (var ci=0; ci<contactPages2.length; ci++) {
+      try {
+        var res3 = await fetch("/api/scrape", {
+          method:"POST", headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({ url: contactPages2[ci], platform: "contact" })
+        });
+        if (res3.ok) {
+          var d3 = await res3.json();
+          var ct3 = extractContacts(d3.text||"");
+          if (ct3.email)    { found.email    = ct3.email;    break; }
+          if (ct3.whatsapp) { found.whatsapp  = ct3.whatsapp; break; }
+        }
+      } catch(e) {}
+    }
   }
 
   // Apply found contacts
@@ -589,12 +655,34 @@ async function searchMediaVacanze(dest, req) {
   return results;
 }
 
-async function searchSubito(dest, req) {
-  // Use Subito's JSON search API — less bot-protected than HTML
-  var url = "https://hades.subito.it/v1/search/items?q=" +
-    encodeURIComponent(dest) +
-    "&cats=27&regions=0&shp=0&types=s&lim=25&start=0&sort=datedesc";
-  return fetchScrape(url, "subito_json");
+async function searchSubito(dest, keys) {
+  // nogards95/subito-scraper — free Apify actor
+  var runId = await apifyRun("nogards95~subito-scraper", {
+    search: dest + " affitto vacanze",
+    maxItems: 20,
+    category: "case-vacanze",
+  }, keys.apify||"");
+  var dsId  = await apifyWait(runId, keys.apify||"");
+  var items = await apifyItems(dsId, keys.apify||"", 20);
+  return items.filter(function(i){return i.title||i.subject||i.name;}).map(function(item) {
+    var ct = extractContacts((item.body||"")+" "+(item.description||"")+" "+(item.phone||""));
+    var isPrivate = !item.advertiser || item.advertiser.type !== "agency";
+    return {
+      platform: "subito",
+      name:     item.title||item.subject||item.name||"Annuncio Subito",
+      type:     (item.category && item.category.friendly_name) || "Affitto vacanze",
+      location: (item.geo && (item.geo.city && item.geo.city.value||item.geo.region&&item.geo.region.value)) || dest,
+      price:    item.price || (item.features&&item.features.find&&(function(){var p=item.features.find(function(f){return f["-id"]==="price";});return p?p.values[0].value:"";})()) || "",
+      phone:    item.phone||ct.phone||null,
+      email:    ct.email,
+      whatsapp: ct.whatsapp,
+      is_private:    isPrivate,
+      owner_managed: isPrivate,
+      no_agency:     isPrivate,
+      new_listing:   !!(item.date && new Date(item.date) > new Date(Date.now()-30*86400000)),
+      src: item.urls&&item.urls.default || item.url || "https://www.subito.it",
+    };
+  });
 }
 
 async function searchIdealista(dest, req) {
@@ -623,26 +711,45 @@ async function searchIdealista(dest, req) {
 }
 
 async function searchImmobiliare(dest, keys) {
-  var slug = normKey(dest).replace(/_/g,"-");
+  // igolaizola/immobiliare-it-scraper — free Apify actor (works for Italy)
+  // For Spain use idealista via Apify or Habitaclia fallback
   var country = detectCountry(dest);
-  var url, platform;
-  if (country === "es") {
-    // Spain: use fotocasa.es instead
-    if (slug === "ibiza") {
-      url = "https://www.fotocasa.es/es/alquiler/viviendas/ibiza/todas-las-zonas/l";
-    } else {
-      url = "https://www.fotocasa.es/es/alquiler/viviendas/" + slug + "/todas-las-zonas/l";
+  if (country === "it" || country === "id") {
+    try {
+      var runId = await apifyRun("igolaizola~immobiliare-it-scraper", {
+        search: dest,
+        maxResults: 20,
+        type: "affitto",
+      }, keys.apify||"");
+      var dsId  = await apifyWait(runId, keys.apify||"");
+      var items = await apifyItems(dsId, keys.apify||"", 20);
+      return items.filter(function(i){return i.title||i.address;}).map(function(item) {
+        var isPrivate = !item.agency && item.advertiserType !== "agency";
+        var ct = extractContacts((item.description||"")+" "+(item.phone||"")+" "+(item.email||""));
+        return {
+          platform:  "immobiliare",
+          name:      item.title||item.address||"Annuncio Immobiliare",
+          type:      item.propertyType||item.category||"Appartamento",
+          location:  item.city||item.address||dest,
+          price:     item.price ? item.price+"€/mese" : "",
+          phone:     item.phone||item.phones&&item.phones[0]||ct.phone||null,
+          email:     item.email||ct.email||null,
+          is_private:    isPrivate,
+          owner_managed: isPrivate,
+          no_agency:     isPrivate,
+          src: item.url||"https://www.immobiliare.it",
+        };
+      });
+    } catch(e) {
+      // Fallback HTML for Italy
+      var slug = normKey(dest).replace(/_/g,"-");
+      return fetchScrape("https://www.immobiliare.it/affitto-case/"+slug+"/", "immobiliare").catch(function(){return [];});
     }
-    platform = "fotocasa";
-  } else if (country === "gr") {
-    // Greece: use spitogatos
-    url = "https://www.spitogatos.gr/en/rent/apartments/" + slug;
-    platform = "spitogatos";
   } else {
-    url = "https://www.immobiliare.it/affitto-case/" + slug + "/?localiMinimo=1";
-    platform = "immobiliare";
+    // Spain/Greece: use Habitaclia scrape
+    var slug2 = normKey(dest).replace(/_/g,"-");
+    return fetchScrape("https://www.habitaclia.com/alquiler-en-"+slug2+".htm", "habitaclia").catch(function(){return [];});
   }
-  return fetchScrape(url, platform);
 }
 
 // ─── RUN SEARCH ───────────────────────────────────────────────────────────────
@@ -693,17 +800,17 @@ async function runSearch(dest, mode, req, keys, onLog) {
   // Direct scraping — sempre attivo su Vercel
   if (IS_VERCEL) {
     tasks.push(wrap("MediaVacanze", function(){return searchMediaVacanze(dest,req);}));
-    tasks.push(wrap("Subito.it",    function(){return searchSubito(dest,req);}));
     tasks.push(wrap("Idealista",    function(){return searchIdealista(dest,req);}));
     tasks.push(wrap("Telegram",     function(){return searchTelegramPublic(dest);}));
   }
 
-  // Apify — richiede apify key
-  // Apify: run if key in app settings OR if APIFY_TOKEN env var is set on Vercel
+  // Apify actors — tutti usano env var APIFY_TOKEN come fallback
   if (IS_VERCEL) {
     tasks.push(wrap("Instagram",    function(){return searchInstagram(dest,keys);}));
     tasks.push(wrap("Facebook",     function(){return searchFacebook(dest,keys);}));
     tasks.push(wrap("Immobiliare",  function(){return searchImmobiliare(dest,keys);}));
+    tasks.push(wrap("Subito.it",    function(){return searchSubito(dest,keys);}));
+    tasks.push(wrap("VRBO",         function(){return searchVRBO(dest,keys);}));
   }
 
   if (!tasks.length) throw new Error("Nessun canale disponibile. Configura le API key.");
