@@ -118,11 +118,16 @@ function extractContacts(text) {
 // ─── VRBO SEARCH ─────────────────────────────────────────────────────────────
 async function searchVRBO(dest, keys) {
   // decorative_chimta/vrbo-main-link-scraper — free Apify actor
+  var cin  = new Date(Date.now()+30*86400000).toISOString().split("T")[0];
+  var cout = new Date(Date.now()+37*86400000).toISOString().split("T")[0];
   var runId = await apifyRun("decorative_chimta~vrbo-main-link-scraper", {
-    location: dest,
-    checkIn:  new Date(Date.now()+30*86400000).toISOString().split("T")[0],
-    checkOut: new Date(Date.now()+37*86400000).toISOString().split("T")[0],
-    adults: 2,
+    startUrls: [{
+      url: "https://www.vrbo.com/search/keywords:" +
+        encodeURIComponent(dest) +
+        "/arrival:" + cin +
+        "/departure:" + cout +
+        "/adults-2/?adultsCount=2&neLat=90&neLong=180&swLat=-90&swLong=-180"
+    }],
     maxItems: 20,
   }, keys.apify||"");
   var dsId  = await apifyWait(runId, keys.apify||"");
@@ -658,9 +663,8 @@ async function searchMediaVacanze(dest, req) {
 async function searchSubito(dest, keys) {
   // nogards95/subito-scraper — free Apify actor
   var runId = await apifyRun("nogards95~subito-scraper", {
-    search: dest + " affitto vacanze",
-    maxItems: 20,
-    category: "case-vacanze",
+    keyword: dest + " affitto vacanze",
+    maxResults: 20,
   }, keys.apify||"");
   var dsId  = await apifyWait(runId, keys.apify||"");
   var items = await apifyItems(dsId, keys.apify||"", 20);
@@ -1320,10 +1324,11 @@ function SettingsModal(props) {
 
         <div style={{padding:"10px 14px",background:"rgba(255,255,255,0.02)",borderRadius:10,
           border:"1px solid rgba(255,255,255,0.07)",marginBottom:16,fontSize:11,color:"#6B7280",lineHeight:1.8}}>
-          <strong style={{color:"#F9FAFB"}}>Canali attivi senza API key:</strong><br/>
-          MediaVacanze · Subito.it · Idealista · Telegram pubblici<br/>
-          <strong style={{color:"#F9FAFB"}}>Con Serper key:</strong> Google Maps + telefoni diretti<br/>
-          <strong style={{color:"#F9FAFB"}}>Con Apify key:</strong> Instagram · Facebook · Immobiliare.it
+          <strong style={{color:"#F9FAFB"}}>💡 Tip:</strong> Aggiungi le key su Vercel<br/>
+          <span style={{fontSize:10,color:"#4B5563"}}>Settings → Environment Variables → APIFY_TOKEN + SERPER_API_KEY</span><br/>
+          <span style={{fontSize:10,color:"#4B5563"}}>Le key verranno caricate automaticamente ad ogni deploy</span><br/><br/>
+          <strong style={{color:"#F9FAFB"}}>Con Serper key:</strong> Google Maps<br/>
+          <strong style={{color:"#F9FAFB"}}>Con Apify key:</strong> Instagram · Facebook · Subito · Immobiliare · VRBO
         </div>
 
         <div style={{display:"flex",gap:8}}>
@@ -1360,28 +1365,46 @@ export default function App() {
   var inpRef = useRef(null);
 
   useEffect(function() {
-    // Load keys — try new key first, fallback to old key names for migration
+    // Step 1: Load from Vercel env vars via /api/config (server-side, always fresh)
+    if (IS_VERCEL) {
+      fetch("/api/config").then(function(r){ return r.ok ? r.json() : null; }).then(function(cfg) {
+        if (cfg && cfg.keys && (cfg.keys.apify || cfg.keys.serper)) {
+          // Env vars are set — use them and save to storage for offline use
+          var fromEnv = { apify: cfg.keys.apify||"", serper: cfg.keys.serper||"" };
+          setApiKeys(fromEnv);
+          storage.set("luxy:keys", JSON.stringify(fromEnv)).catch(function(){});
+          return; // skip localStorage lookup
+        }
+        // Env vars not set — fall through to localStorage
+        loadKeysFromStorage();
+      }).catch(function(){ loadKeysFromStorage(); });
+    } else {
+      loadKeysFromStorage();
+    }
+
+    storage.get("luxy:leads").then(function(r) {
+      if (r&&r.value) { try { setAllLeads(JSON.parse(r.value)); } catch(e){} }
+    }).catch(function(){});
+  },[]);
+
+  function loadKeysFromStorage() {
     storage.get("luxy:keys").then(function(r) {
       if (r&&r.value) {
         try { setApiKeys(JSON.parse(r.value)); return; } catch(e){}
       }
-      // Migration: try old storage key names
+      // Migration: try old storage key name
       return storage.get("luxy:api_keys").then(function(r2) {
         if (r2&&r2.value) {
           try {
-            var old = JSON.parse(r2.value);
-            // old format had: apify, rapid, google — map to new format
-            var migrated = { apify: old.apify||"", serper: old.serper||"" };
+            var old2 = JSON.parse(r2.value);
+            var migrated = { apify: old2.apify||"", serper: old2.serper||"" };
             setApiKeys(migrated);
             storage.set("luxy:keys", JSON.stringify(migrated)).catch(function(){});
           } catch(e){}
         }
       });
     }).catch(function(){});
-    storage.get("luxy:leads").then(function(r) {
-      if (r&&r.value) { try { setAllLeads(JSON.parse(r.value)); } catch(e){} }
-    }).catch(function(){});
-  },[]);
+  }
 
   function addLog(level, msg) {
     setLogs(function(prev) {
