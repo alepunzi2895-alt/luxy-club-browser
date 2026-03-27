@@ -297,14 +297,21 @@ function computeScore(s, req) {
 }
 
 // ─── API HELPERS ──────────────────────────────────────────────────────────────
-async function callClaude(text, system) {
+async function callClaude(text, system, retries) {
+  retries = retries || 0;
   var url = IS_VERCEL ? "/api/claude" : "https://api.anthropic.com/v1/messages";
   var body = IS_VERCEL
     ? JSON.stringify({ system:system, messages:[{role:"user",content:text}], max_tokens:600 })
     : JSON.stringify({ model:"claude-sonnet-4-20250514", max_tokens:600, system:system, messages:[{role:"user",content:text}] });
   var res = await fetch(url, { method:"POST", headers:{"Content-Type":"application/json"}, body:body });
   if (!res.ok) {
+    // 529 = overloaded — retry up to 2 times with backoff
+    if ((res.status===529 || res.status===503 || res.status===429) && retries < 2) {
+      await new Promise(function(r){setTimeout(r, (retries+1)*2000);});
+      return callClaude(text, system, retries+1);
+    }
     if (res.status===500 && IS_VERCEL) throw new Error("Claude 500 — aggiungi ANTHROPIC_API_KEY su Vercel");
+    if (res.status===529) throw new Error("Claude sovraccarico (529) — riprova tra qualche secondo");
     throw new Error("Claude HTTP "+res.status);
   }
   var d = await res.json();
@@ -317,6 +324,8 @@ async function fetchScrape(url, platform) {
     body:JSON.stringify({ url:url, platform:platform })
   });
   var d = await res.json();
+  if (d.blocked) throw new Error("Bot detection — " + (url.split("/")[2]||platform));
+  if (d.error && (!d.results || !d.results.length)) throw new Error(d.error);
   return d.results||[];
 }
 
@@ -567,12 +576,15 @@ async function searchTelegramPublic(dest) {
 }
 
 async function searchMediaVacanze(dest, req) {
-  // MediaVacanze supports multiple languages — try both search endpoints
-  var encoded = encodeURIComponent(dest);
   var country = detectCountry(dest);
-  var countryCode = country === "es" ? "es" : country === "gr" ? "gr" : "it";
-  // Primary: text search URL
-  var url = "https://www.mediavacanze.com/affitto-vacanze.php?search=" + encoded;
+  // MediaVacanze has different URL patterns
+  // For Spain destinations use the Spanish version
+  var baseUrl = country === "es"
+    ? "https://www.mediavacanze.com/es/"
+    : "https://www.mediavacanze.com/it/";
+  var encoded = encodeURIComponent(dest);
+  // Try the search results page directly
+  var url = "https://www.mediavacanze.com/case-vacanze.php?pays=&region=&ville=" + encoded + "&npers=&type=&submit=Cercare";
   return fetchScrape(url, "mediavacanze");
 }
 

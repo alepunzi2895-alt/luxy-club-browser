@@ -55,9 +55,28 @@ export default async function handler(req, res) {
       redirect: "follow",
     });
 
-    if (!r.ok) return res.status(r.status).json({ error: "Upstream HTTP " + r.status, results: [] });
+    if (!r.ok) {
+      // Log why it failed
+      const errBody = await r.text().catch(() => "");
+      const reason = r.status === 403 ? "Bot detection / IP bloccato" :
+                     r.status === 404 ? "URL non trovato" :
+                     r.status === 429 ? "Rate limit" :
+                     r.status === 503 ? "Sito non disponibile" : "HTTP " + r.status;
+      return res.status(r.status).json({ error: reason + " ("+url.split("/")[2]+")", results: [] });
+    }
 
     const html = await r.text();
+    // Detect bot blocking even on 200
+    const isBlocked = html.length < 500 ||
+      /enable javascript|checking your browser|cloudflare ray|access denied|robot|captcha/i.test(html.slice(0, 2000));
+    if (isBlocked) {
+      return res.status(200).json({
+        error: "Bot detection attivo su " + url.split("/")[2] + " — sito ha bloccato la richiesta",
+        results: [],
+        blocked: true,
+      });
+    }
+
     const results = parseHtml(html, platform, url);
     // For contact pages, also return raw text for enrichment
     if (platform === "contact") {
@@ -97,6 +116,12 @@ function parseHtml(html, platform, baseUrl) {
 
 function parseMediaVacanze(html, baseUrl) {
   const results = [];
+
+  // Check for anti-bot redirect (common with mediavacanze)
+  if (html.includes("enable javascript") || html.includes("checking your browser") ||
+      html.includes("cloudflare") || html.length < 1000) {
+    return results; // Bot blocked
+  }
 
   // Try JSON-LD structured data
   const ldMatches = html.matchAll(/<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi);
@@ -179,80 +204,119 @@ function parseSubito(html, baseUrl) {
     } catch(e) {}
   }
 
-  // Fallback: card parsing
+  // Fallback 1: data-item-id cards
   if (results.length === 0) {
-    const cardPattern = /data-item-id="[^"]*"[^>]*>([\s\S]*?)(?=data-item-id=|$)/g;
+    const cardPattern = /data-item-id="([^"]+)"[^>]*>([\s\S]*?)(?=data-item-id=|$)/g;
     let m;
     let count = 0;
     while ((m = cardPattern.exec(html)) !== null && count < 20) {
-      const block = m[1];
-      const titleM = block.match(/class="[^"]*title[^"]*"[^>]*>([^<]{5,80})</);
-      const priceM = block.match(/(\d[\d.,]+)\s*€/);
+      const itemId = m[1];
+      const block  = m[2];
+      const titleM = block.match(/class="[^"]*(?:title|SmallCard-module_title|name)[^"]*"[^>]*>([^<]{3,80})</i);
+      const priceM = block.match(/([\d.,]+)\s*€/);
       const linkM  = block.match(/href="(\/annunci[^"]+)"/);
-      if (titleM) {
-        const ct = extractContacts(block);
-        results.push({
-          platform: "subito",
-          name: titleM[1].trim(),
-          type: "Annuncio affitto",
-          price: priceM ? priceM[1] + "€" : "",
-          email: ct.email, whatsapp: ct.whatsapp, phone: ct.phone,
-          is_private: true, owner_managed: true,
-          src: linkM ? "https://www.subito.it" + linkM[1] : baseUrl,
-        });
-        count++;
-      }
+      const name   = titleM ? titleM[1].trim() : ("Annuncio Subito " + itemId);
+      const ct     = extractContacts(block);
+      results.push({
+        platform: "subito", name: name,
+        type: "Annuncio affitto", price: priceM ? priceM[1] + "€" : "",
+        email: ct.email, whatsapp: ct.whatsapp, phone: ct.phone,
+        is_private: true, owner_managed: true,
+        src: linkM ? "https://www.subito.it" + linkM[1] : ("https://www.subito.it/annunci/" + itemId + ".htm"),
+      });
+      count++;
     }
   }
+
+  // Fallback 2: any ad links on the page
+  if (results.length === 0) {
+    const adLinks = html.match(/href="(https:\/\/www\.subito\.it\/[^"]+\.htm)"/g) || [];
+    adLinks.slice(0, 10).forEach(function(lk, i) {
+      const url2 = lk.replace(/href="|"/g, "");
+      const slug = url2.split("/").pop().replace(".htm","").replace(/-/g," ");
+      results.push({
+        platform: "subito", name: slug || ("Annuncio Subito " + (i+1)),
+        type: "Annuncio affitto", is_private: true, owner_managed: true,
+        src: url2,
+      });
+    });
+  }
+
   return results.slice(0, 20);
 }
 
 function parseIdealista(html, baseUrl) {
   const results = [];
+  const isDotCom = baseUrl.includes("idealista.com");
 
-  // Try __NEXT_DATA__ embedded JSON
+  // Try __NEXT_DATA__ — key paths differ between .it and .com
   const nextM = html.match(/<script[^>]*id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
   if (nextM) {
     try {
       const data = JSON.parse(nextM[1]);
-      const props = data.props && data.props.pageProps;
-      const items = (props && (props.items || props.properties || props.ads)) || [];
+      const props = (data.props && data.props.pageProps) || {};
+      // Try all known key paths
+      const items = props.items || props.properties || props.ads ||
+        (props.initialProps && props.initialProps.items) ||
+        (props.adList && props.adList.ads) || [];
       items.slice(0, 20).forEach(function(item) {
-        const isPrivate = !item.realEstateAgency && !item.agency;
+        const isPrivate = !item.realEstateAgency && !item.agency && !item.agencyLogo;
+        const title = (item.suggestedTexts && item.suggestedTexts.title) ||
+          item.title || item.description || ("Annuncio Idealista");
+        const baseHost = isDotCom ? "https://www.idealista.com" : "https://www.idealista.it";
         results.push({
           platform: "idealista",
-          name: (item.suggestedTexts && item.suggestedTexts.title) || ("Annuncio " + (item.typology && item.typology.label || "Idealista")),
-          type: (item.typology && item.typology.label) || "Appartamento",
-          location: item.address || item.location || "",
-          price: item.price ? item.price + "€/mese" : "",
-          phone: item.phone || null,
+          name: title.slice(0, 80),
+          type: (item.typology && item.typology.label) || (item.propertyType) || "Appartamento",
+          location: item.address || item.municipality || item.district || "",
+          price: item.price ? item.price + "€/mese" : (item.priceInfo && item.priceInfo.amount ? item.priceInfo.amount + "€" : ""),
+          phone: item.phone || (item.contactInfo && item.contactInfo.phone1) || null,
           is_private: isPrivate,
           owner_managed: isPrivate,
           no_agency: isPrivate,
-          src: item.url ? "https://www.idealista.it" + item.url : baseUrl,
+          src: item.url ? (item.url.startsWith("http") ? item.url : baseHost + item.url) : baseUrl,
         });
       });
     } catch(e) {}
   }
 
-  // Fallback regex
+  // Fallback: scan for article/listing tags
   if (results.length === 0) {
-    const priceMs = (html.match(/(\d[\d.]+)\s*€(?:\s*\/\s*(?:mese|mes|month))?/gi) || []).slice(0, 20);
-    const titleMs = (html.match(/class="[^"]*item-title[^"]*"[^>]*>([^<]{5,80})</g) || []).slice(0, 20);
-    titleMs.forEach(function(tm, i) {
-      const name = tm.replace(/^[^>]+>/, "").trim();
-      if (name) {
+    // Try common listing patterns for both idealista.it and .com
+    const articleMs = html.match(/(?:class="[^"]*(?:item-info|property-info|listing-item)[^"]*")[^>]*>([\s\S]{20,400}?)(?=class="[^"]*(?:item-info|property-info|listing-item)|<\/(?:article|li|div)>)/gi) || [];
+    articleMs.slice(0, 15).forEach(function(block) {
+      const titleM = block.match(/(?:item-title|property-title|heading)[^>]*>([^<]{5,80})</i);
+      const priceM = block.match(/([\d.,]+)\s*€/);
+      const linkM  = block.match(/href="([^"]+(?:vivienda|affitto|alquiler)[^"]+)"/);
+      if (titleM) {
         results.push({
           platform: "idealista",
-          name: name,
+          name: titleM[1].trim(),
           type: "Appartamento",
-          price: priceMs[i] || "",
+          price: priceM ? priceM[1] + "€" : "",
           is_private: false,
-          src: baseUrl,
+          src: linkM ? (linkM[1].startsWith("http") ? linkM[1] : (isDotCom ? "https://www.idealista.com" : "https://www.idealista.it") + linkM[1]) : baseUrl,
         });
       }
     });
   }
+
+  // Last resort: any price + description pattern
+  if (results.length === 0) {
+    const blocks = html.split(/data-element-id=|data-adid=/).slice(1, 16);
+    blocks.forEach(function(block) {
+      const priceM = block.match(/([\d.,]+)\s*€/);
+      const titleM = block.match(/>([^<]{10,60}(?:appartamento|villa|piso|casa|habitaci)[^<]*)</i);
+      if (priceM && titleM) {
+        results.push({
+          platform: "idealista", name: titleM[1].trim(),
+          type: "Appartamento", price: priceM[1] + "€",
+          is_private: false, src: baseUrl,
+        });
+      }
+    });
+  }
+
   return results.slice(0, 20);
 }
 
@@ -399,12 +463,36 @@ function parseFotocasa(html, baseUrl) {
       });
     } catch(e) {}
   }
-  // Fallback title scan
+  // Fallback: scan for card titles and prices
   if (results.length === 0) {
-    const titles = html.match(/data-testid="card-title"[^>]*>([^<]{5,80})</g) || [];
-    titles.slice(0,15).forEach(function(t) {
-      const name = t.replace(/^[^>]+>/, "").trim();
-      if (name) results.push({ platform:"fotocasa", name, type:"Appartamento", is_private:false, src:baseUrl });
+    const titlePat = [
+      /data-testid="card-title"[^>]*>([^<]{5,80})</g,
+      /class="[^"]*re-Card-title[^"]*"[^>]*>([^<]{5,80})</g,
+      /class="[^"]*fc-DetailHeader[^"]*"[^>]*>([^<]{5,80})</g,
+    ];
+    for (const pat of titlePat) {
+      const titles = html.match(pat) || [];
+      if (titles.length > 0) {
+        titles.slice(0,15).forEach(function(t) {
+          const name = t.replace(/^[^>]+>/, "").trim();
+          if (name) results.push({ platform:"fotocasa", name, type:"Appartamento", is_private:false, src:baseUrl });
+        });
+        break;
+      }
+    }
+  }
+  // Absolute fallback: grab any price+description combo
+  if (results.length === 0) {
+    const priceBlocks = html.match(/[\d.,]+\s*€(?:\/mes)?[\s\S]{0,200}?<\/[^>]+>/g) || [];
+    priceBlocks.slice(0, 10).forEach(function(block, i) {
+      const price = (block.match(/([\d.,]+)\s*€/) || [])[1];
+      const nameM = block.match(/>([^<]{10,60})</);
+      if (price) {
+        results.push({
+          platform:"fotocasa", name: nameM ? nameM[1].trim() : ("Annuncio Fotocasa " + (i+1)),
+          type:"Appartamento", price: price + "€/mese", is_private:false, src:baseUrl,
+        });
+      }
     });
   }
   return results.slice(0, 20);
