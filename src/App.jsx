@@ -695,50 +695,9 @@ async function searchMediaVacanze(dest, req) {
 }
 
 async function searchSubito(dest, keys) {
-  // nogards95/subito-scraper — free Apify actor
-  // Use apify/cheerio-scraper (free, always available) to scrape Subito search page
-  var searchUrl = "https://www.subito.it/annunci-italia/affitto-vacanze/case-vacanza/?q=" + encodeURIComponent(dest);
-  var runId = await apifyRun("apify~cheerio-scraper", {
-    startUrls: [{ url: searchUrl }],
-    pageFunction: `async function pageFunction(context) {
-      const { $, request } = context;
-      const items = [];
-      $('[data-item-id]').each(function() {
-        const el = $(this);
-        const title = el.find('[class*="title"]').first().text().trim();
-        const price = el.find('[class*="price"]').first().text().trim();
-        const link  = el.find('a').first().attr('href');
-        const phone = el.find('[class*="phone"]').first().text().trim();
-        if (title || price) {
-          items.push({ title, price, phone,
-            url: link ? ('https://www.subito.it' + link) : request.url });
-        }
-      });
-      return items;
-    }`,
-    maxRequestsPerCrawl: 1,
-  }, keys.apify||"");
-  var dsId  = await apifyWait(runId, keys.apify||"");
-  var items = await apifyItems(dsId, keys.apify||"", 20);
-  // Flatten nested results
-  var flat = [];
-  items.forEach(function(item) {
-    if (Array.isArray(item)) flat = flat.concat(item);
-    else if (item.title || item.price) flat.push(item);
-  });
-  return flat.filter(function(i){return i.title||i.price;}).map(function(item) {
-    var ct = extractContacts((item.phone||"")+" "+(item.description||""));
-    return {
-      platform: "subito",
-      name:     item.title||"Annuncio Subito",
-      type:     "Affitto vacanze",
-      price:    item.price||"",
-      phone:    item.phone||ct.phone||null,
-      email:    ct.email, whatsapp: ct.whatsapp,
-      is_private: true, owner_managed: true, no_agency: true,
-      src: item.url||searchUrl,
-    };
-  });
+  // Scraping diretto via /api/scrape — nessun actor Apify
+  var url = "https://www.subito.it/annunci-italia/affitto-vacanze/case-vacanza/?q=" + encodeURIComponent(dest);
+  return fetchScrape(url, "subito");
 }
 
 async function searchIdealista(dest, req) {
