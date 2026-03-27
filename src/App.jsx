@@ -23,7 +23,6 @@ var PLATFORMS = {
   subito:      { label:"Subito.it",      color:"#CC0000" },
   idealista:   { label:"Idealista",      color:"#003399" },
   immobiliare: { label:"Immobiliare.it", color:"#0E4CB2" },
-  airbnb:      { label:"Airbnb",         color:"#FF5A5F" },
   homeaway:    { label:"VRBO",           color:"#2196F3" },
   vrbo:        { label:"VRBO",           color:"#2196F3" },
 };
@@ -612,47 +611,81 @@ async function searchInstagram(dest, keys) {
 }
 
 async function searchFacebook(dest, keys) {
-  // Search for rental pages and groups
-  var queries = [
-    "affitti vacanze " + dest,
-    "case vacanze " + dest,
-    "villa rental " + dest,
-  ];
-  var all = [], seen = {};
-  for (var qi = 0; qi < queries.length; qi++) {
-    try {
-      var runId = await apifyRun("apify~facebook-pages-scraper",{
-        startUrls:[{
-          url: "https://www.facebook.com/search/pages/?q=" + encodeURIComponent(queries[qi])
-        }],
-        maxPosts: 3,
-        maxReviews: 0,
-      }, keys.apify);
-      var dsId = await apifyWait(runId, keys.apify);
-      var items = await apifyItems(dsId, keys.apify, 10);
-      items.filter(function(i){return i.name||i.title;}).forEach(function(item) {
-        var k = (item.name||item.title||"").toLowerCase().replace(/\s/g,"");
-        if (seen[k]) return; seen[k]=true;
-        var ct = extractContacts((item.phone||"")+" "+(item.email||"")+" "+(item.about||"")+" "+(item.description||""));
-        all.push({
-          platform:  "facebook",
-          name:      item.name||item.title||"",
-          type:      "Pagina Facebook",
-          location:  item.city||dest,
-          website:   item.website||null,
-          phone:     item.phone||ct.phone||null,
-          email:     item.email||ct.email||null,
-          whatsapp:  ct.whatsapp,
-          is_private:    false,
-          owner_managed: false,
-          no_agency:     false,
-          src: item.url||item.pageUrl||"",
-        });
+  // Step 1: usa Serper per trovare URL di pagine Facebook reali
+  // (facebook-pages-scraper richiede URL diretti di pagine, non URL di ricerca)
+  var fbPageUrls = [];
+  try {
+    var queries = [
+      "site:facebook.com affitti vacanze " + dest,
+      "site:facebook.com villa rental " + dest,
+      "site:facebook.com case vacanze " + dest,
+    ];
+    for (var qi = 0; qi < queries.length; qi++) {
+      var res = await fetch("/api/serper", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ query: queries[qi], serperKey: keys.serper||"", type: "search" })
       });
-      if (all.length >= 10) break;
-    } catch(e) {}
+      if (!res.ok) continue;
+      var data = await res.json();
+      (data.organic||[]).forEach(function(r) {
+        var url = r.link||"";
+        // Solo pagine Facebook — no profili personali o gruppi
+        if (url.includes("facebook.com") &&
+            !url.includes("/groups/") &&
+            !url.includes("/profile.php") &&
+            !url.includes("facebook.com/watch") &&
+            fbPageUrls.length < 6) {
+          fbPageUrls.push({ url: url });
+        }
+      });
+      if (fbPageUrls.length >= 4) break;
+    }
+  } catch(e) {}
+
+  if (!fbPageUrls.length) return [];
+
+  // Step 2: scrapa le pagine Facebook trovate con l'actor
+  try {
+    var runId = await apifyRun("apify~facebook-pages-scraper", {
+      startUrls: fbPageUrls,
+      maxPosts: 5,
+      maxReviews: 0,
+    }, keys.apify||"");
+    var dsId  = await apifyWait(runId, keys.apify||"");
+    var items = await apifyItems(dsId, keys.apify||"", 15);
+    var seen = {};
+    return items.filter(function(i){return i.name||i.title;}).map(function(item) {
+      var ct = extractContacts(
+        (item.phone||"")+" "+(item.email||"")+" "+
+        (item.about||"")+" "+(item.description||"")
+      );
+      return {
+        platform:  "facebook",
+        name:      item.name||item.title||"",
+        type:      "Pagina Facebook",
+        location:  item.city||dest,
+        website:   item.website||null,
+        phone:     item.phone||ct.phone||null,
+        email:     item.email||ct.email||null,
+        whatsapp:  ct.whatsapp,
+        is_private:    !!(item.about && !/agenzia|agency/i.test(item.about)),
+        owner_managed: false,
+        src: item.url||item.pageUrl||"",
+      };
+    });
+  } catch(e) {
+    // Fallback: restituisci almeno i link trovati da Serper come lead
+    return fbPageUrls.map(function(p, i) {
+      return {
+        platform: "facebook",
+        name:     "Pagina Facebook " + dest + " #" + (i+1),
+        type:     "Pagina Facebook",
+        location: dest,
+        is_private: false,
+        src: p.url,
+      };
+    });
   }
-  return all;
 }
 
 async function searchTelegramPublic(dest) {
@@ -695,9 +728,44 @@ async function searchMediaVacanze(dest, req) {
 }
 
 async function searchSubito(dest, keys) {
-  // Scraping diretto via /api/scrape — nessun actor Apify
-  var url = "https://www.subito.it/annunci-italia/affitto-vacanze/case-vacanza/?q=" + encodeURIComponent(dest);
-  return fetchScrape(url, "subito");
+  // Subito bloccca Vercel IPs — usiamo Serper per trovare annunci Subito
+  // Cerca "site:subito.it affitto vacanze DEST" via Google
+  try {
+    var res = await fetch("/api/serper", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({
+        query: "site:subito.it affitto vacanze " + dest,
+        serperKey: keys.serper||"",
+        type: "search"
+      })
+    });
+    if (!res.ok) throw new Error("Serper " + res.status);
+    var data = await res.json();
+    var organic = data.organic||[];
+    return organic.filter(function(r){
+      return r.link && r.link.includes("subito.it");
+    }).map(function(r) {
+      var ct = extractContacts((r.snippet||"")+" "+(r.title||""));
+      // Extract price from snippet
+      var priceM = (r.snippet||"").match(/(\d[\d.,]+)\s*€/);
+      return {
+        platform:  "subito",
+        name:      r.title||"Annuncio Subito",
+        type:      "Affitto vacanze",
+        location:  dest,
+        price:     priceM ? priceM[1]+"€" : "",
+        email:     ct.email,
+        whatsapp:  ct.whatsapp,
+        phone:     ct.phone,
+        is_private:    true,
+        owner_managed: true,
+        no_agency:     true,
+        src:       r.link,
+      };
+    });
+  } catch(e) {
+    return [];
+  }
 }
 
 async function searchIdealista(dest, req) {
@@ -828,7 +896,7 @@ async function runSearch(dest, mode, req, keys, onLog) {
     tasks.push(wrap("Immobiliare",  function(){return searchImmobiliare(dest,keys);}));
     tasks.push(wrap("Subito.it",    function(){return searchSubito(dest,keys);}));
     tasks.push(wrap("VRBO",         function(){return searchVRBO(dest,keys);}));
-    tasks.push(wrap("Airbnb",       function(){return searchAirbnbApify(dest,keys);}));
+
   }
 
   if (!tasks.length) throw new Error("Nessun canale disponibile. Configura le API key.");
