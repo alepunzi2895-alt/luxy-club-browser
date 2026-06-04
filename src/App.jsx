@@ -6,13 +6,35 @@ var IS_VERCEL = typeof window !== "undefined" &&
   (window.location.hostname.endsWith(".vercel.app") ||
    window.location.hostname === "localhost");
 
-var SEARCH_MODES = [
-  { id:"all",          label:"Tutto" },
-  { id:"privati",      label:"Solo Privati" },
-  { id:"proprietari",  label:"Proprietari Diretti" },
-  { id:"villaggi",     label:"Villaggi & Resort" },
-  { id:"agenzie",      label:"Agenzie Collaborazione" },
+var SEARCH_CATEGORIES = [
+  { id:"immobili", label:"Immobili" },
+  { id:"barche",   label:"Barche" },
+  { id:"auto",     label:"Auto" },
 ];
+
+var SEARCH_MODES_BY_CAT = {
+  immobili: [
+    { id:"all",         label:"Tutto" },
+    { id:"privati",     label:"Solo Privati" },
+    { id:"proprietari", label:"Proprietari Diretti" },
+    { id:"villaggi",    label:"Villaggi & Resort" },
+    { id:"agenzie",     label:"Agenzie Collaborazione" },
+  ],
+  barche: [
+    { id:"all",      label:"Tutti" },
+    { id:"privati",  label:"Privati Diretti" },
+    { id:"noleggio", label:"Solo Noleggio" },
+    { id:"vendita",  label:"Solo Vendita" },
+  ],
+  auto: [
+    { id:"all",     label:"Tutti" },
+    { id:"privati", label:"Privati Diretti" },
+    { id:"vendita", label:"Solo Vendita" },
+    { id:"km0",     label:"Km 0 / Nuovo" },
+  ],
+};
+
+var SEARCH_MODES = SEARCH_MODES_BY_CAT.immobili;
 
 var PLATFORMS = {
   google:      { label:"Google Maps",    color:"#4285F4" },
@@ -56,6 +78,28 @@ var NLP_PROMPT = "Sei un parser di richieste di ricerca proprietari di immobili.
   "\"budgetMax\":1500,\"budgetPeriod\":\"notte|settimana|mese\",\"durationType\":\"stagionale|annuale|breve\",\"licenza\":false} " +
   "Valori: roomType=intera se appartamento/villa/casa intera; condivisa se stanza in appartamento con altri; stanza se stanza privata con bagno. " +
   "licenza=true se menziona licenza, autorizzazione, locazione turistica. Metti null per campi non presenti. Non inventare dati.";
+
+var NLP_PROMPT_BARCHE = "Sei un parser di ricerche barche e imbarcazioni. Estrai i parametri e rispondi SOLO con JSON valido, nessun testo extra. " +
+  "Schema: {\"destination\":\"porto o zona\",\"tipoBarche\":\"vela|motore|gommone|catamarano|lusso|all\"," +
+  "\"persone\":2,\"budgetMax\":5000,\"budgetPeriod\":\"giorno|settimana|mese\",\"durationType\":\"noleggio|vendita\",\"annoMin\":null} " +
+  "tipoBarche=all se non specificato. durationType=noleggio se cerca noleggio/charter, vendita se cerca acquisto/usato. Metti null per campi non presenti.";
+
+var NLP_PROMPT_AUTO = "Sei un parser di ricerche auto. Estrai i parametri e rispondi SOLO con JSON valido, nessun testo extra. " +
+  "Schema: {\"destination\":\"citta o zona\",\"marca\":null,\"modello\":null,\"annoMin\":null,\"annoMax\":null," +
+  "\"budgetMax\":15000,\"kmMax\":null,\"durationType\":\"vendita|noleggio\",\"km0\":false} " +
+  "km0=true se cerca auto nuova o km0. durationType=vendita di default. Metti null per campi non presenti.";
+
+function getNlpPrompt(category) {
+  if (category === "barche") return NLP_PROMPT_BARCHE;
+  if (category === "auto")   return NLP_PROMPT_AUTO;
+  return NLP_PROMPT;
+}
+
+function parsePrice(str) {
+  if (!str) return Infinity;
+  var n = parseFloat(String(str).replace(/[^\d,]/g,"").replace(",","."));
+  return isNaN(n) ? Infinity : n;
+}
 
 // ─── STORAGE ──────────────────────────────────────────────────────────────────
 var storage = (function() {
@@ -505,9 +549,38 @@ function isTouristAccommodation(p) {
   return true;
 }
 
-async function searchGoogleMaps(dest, mode, req, keys) {
+async function searchGoogleMaps(dest, mode, req, keys, category) {
+  category = category || "immobili";
   var queries = [];
-  if (mode === "villaggi") {
+  if (category === "barche") {
+    if (mode === "noleggio") {
+      queries = [dest + " noleggio barche charter", dest + " boat rental charter " + dest];
+    } else if (mode === "vendita") {
+      queries = [dest + " vendita barche usate privato", dest + " barche usate occasione " + dest];
+    } else if (mode === "privati") {
+      queries = [dest + " barche usate privato", dest + " barca privato vendo " + dest];
+    } else {
+      queries = [
+        dest + " noleggio barche charter",
+        dest + " vendita barche usate privato",
+        dest + " nautica cantiere barche " + dest,
+      ];
+    }
+  } else if (category === "auto") {
+    if (mode === "km0") {
+      queries = [dest + " auto km 0 nuova concessionaria", dest + " auto nuova vendita " + dest];
+    } else if (mode === "privati") {
+      queries = [dest + " auto usate privato vendita", dest + " vendo auto privato " + dest];
+    } else if (mode === "vendita") {
+      queries = [dest + " vendita auto usate", dest + " concessionaria auto usate " + dest];
+    } else {
+      queries = [
+        dest + " auto usate concessionaria vendita",
+        dest + " vendita auto privato",
+        dest + " noleggio auto " + dest,
+      ];
+    }
+  } else if (mode === "villaggi") {
     queries = [dest + " resort villaggi turistici", dest + " hotel boutique"];
   } else if (mode === "agenzie") {
     queries = [dest + " agenzia affitti vacanze", dest + " property management"];
@@ -525,6 +598,7 @@ async function searchGoogleMaps(dest, mode, req, keys) {
     ];
   }
 
+  var isBoatCar = category === "barche" || category === "auto";
   var allPlaces = [], seenNames = {};
   for (var qi = 0; qi < queries.length; qi++) {
     try {
@@ -533,7 +607,7 @@ async function searchGoogleMaps(dest, mode, req, keys) {
       places.forEach(function(p) {
         var k = (p.title||p.name||"").toLowerCase().replace(/\s+/g,"");
         if (!k || seenNames[k]) return;
-        if (!isTouristAccommodation(p)) return;
+        if (!isBoatCar && !isTouristAccommodation(p)) return;
         seenNames[k] = true;
         allPlaces.push(p);
       });
@@ -550,10 +624,13 @@ async function searchGoogleMaps(dest, mode, req, keys) {
       if (p.placeId) mapsLink = "https://www.google.com/maps/place/?q=place_id:" + p.placeId;
       else mapsLink = "https://www.google.com/maps/search/" + encodeURIComponent((p.title||dest));
     }
+    var typeLabel = category === "barche" ? (p.type||"Barca/Imbarcazione")
+                  : category === "auto"   ? (p.type||"Auto")
+                  : (p.type||p.category||"Struttura");
     return {
       platform:  "google",
       name:      p.title||p.name||"",
-      type:      p.type||p.category||"Struttura",
+      type:      typeLabel,
       location:  p.address||dest,
       website:   p.website||null,
       phone:     p.phoneNumber||p.phone||null,
@@ -570,9 +647,16 @@ async function searchGoogleMaps(dest, mode, req, keys) {
   });
 }
 
-async function searchInstagram(dest, keys) {
+async function searchInstagram(dest, keys, category) {
   var slug = normKey(dest);
-  var tags = [slug+"villa", slug+"vacation", slug+"affitti", slug+"rental", slug+"accommodation"].slice(0,4);
+  var tags;
+  if (category === "barche") {
+    tags = [slug+"barche", slug+"nautica", slug+"boatrental", slug+"charter"].slice(0,4);
+  } else if (category === "auto") {
+    tags = [slug+"auto", slug+"autousate", slug+"carsforsale", slug+"usato"].slice(0,4);
+  } else {
+    tags = [slug+"villa", slug+"vacation", slug+"affitti", slug+"rental", slug+"accommodation"].slice(0,4);
+  }
   var runId = await apifyRun("apify~instagram-hashtag-scraper",{hashtags:tags,resultsLimit:20},keys.apify);
   var dsId  = await apifyWait(runId, keys.apify);
   var items = await apifyItems(dsId, keys.apify, 20);
@@ -602,12 +686,15 @@ async function searchInstagram(dest, keys) {
 }
 
 // ─── FACEBOOK PAGES + GROUPS ──────────────────────────────────────────────────
-async function searchFacebook(dest, keys) {
-  var queries = [
-    "affitti vacanze " + dest,
-    "case vacanze " + dest,
-    "villa rental " + dest,
-  ];
+async function searchFacebook(dest, keys, category) {
+  var queries;
+  if (category === "barche") {
+    queries = ["noleggio barche " + dest, "charter barche " + dest, "vendita barche " + dest];
+  } else if (category === "auto") {
+    queries = ["auto usate " + dest, "vendita auto " + dest, "concessionaria auto " + dest];
+  } else {
+    queries = ["affitti vacanze " + dest, "case vacanze " + dest, "villa rental " + dest];
+  }
   var all = [], seen = {};
   for (var qi = 0; qi < queries.length; qi++) {
     try {
@@ -646,13 +733,28 @@ async function searchFacebook(dest, keys) {
 }
 
 // Cerca in gruppi Facebook via Google/Serper (site:facebook.com/groups)
-async function searchFacebookGroups(dest, keys) {
+async function searchFacebookGroups(dest, keys, category) {
   if (!IS_VERCEL && !keys.serper) return [];
-  var queries = [
-    'site:facebook.com/groups "' + dest + '" affitto appartamento proprietario',
-    'site:facebook.com/groups "' + dest + '" case vacanze privati',
-    'site:facebook.com/groups affitto privato "' + dest + '"',
-  ];
+  var queries;
+  if (category === "barche") {
+    queries = [
+      'site:facebook.com/groups "barche" "' + dest + '"',
+      'site:facebook.com/groups "noleggio barche" "' + dest + '"',
+      'site:facebook.com/groups "vendita barche" "' + dest + '"',
+    ];
+  } else if (category === "auto") {
+    queries = [
+      'site:facebook.com/groups "auto usate" "' + dest + '"',
+      'site:facebook.com/groups "vendita auto" "' + dest + '"',
+      'site:facebook.com/groups "vendo auto" "' + dest + '"',
+    ];
+  } else {
+    queries = [
+      'site:facebook.com/groups "' + dest + '" affitto appartamento proprietario',
+      'site:facebook.com/groups "' + dest + '" case vacanze privati',
+      'site:facebook.com/groups affitto privato "' + dest + '"',
+    ];
+  }
   var all = [], seen = {};
   for (var qi = 0; qi < queries.length; qi++) {
     try {
@@ -684,9 +786,16 @@ async function searchFacebookGroups(dest, keys) {
 }
 
 // Cerca annunci su Telegram via Google/Serper (site:t.me)
-async function searchTelegramSerper(dest, keys) {
+async function searchTelegramSerper(dest, keys, category) {
   if (!IS_VERCEL && !keys.serper) return [];
-  var query = 'site:t.me "' + dest + '" affitto appartamento proprietario';
+  var query;
+  if (category === "barche") {
+    query = 'site:t.me "' + dest + '" barche noleggio vendita';
+  } else if (category === "auto") {
+    query = 'site:t.me "' + dest + '" auto usate vendita';
+  } else {
+    query = 'site:t.me "' + dest + '" affitto appartamento proprietario';
+  }
   try {
     var data = await fetchSerper(query, keys.serper);
     var all = [], seen = {};
@@ -749,8 +858,18 @@ async function searchMediaVacanze(dest, req) {
   return results;
 }
 
-async function searchSubito(dest, keys) {
-  var searchUrl = "https://www.subito.it/annunci-italia/affitto-vacanze/case-vacanza/?q=" + encodeURIComponent(dest);
+async function searchSubito(dest, keys, category) {
+  var searchUrl, typeLabel;
+  if (category === "barche") {
+    searchUrl = "https://www.subito.it/annunci-italia/vendita/barche-e-accessori/?q=" + encodeURIComponent(dest);
+    typeLabel = "Barca/Imbarcazione";
+  } else if (category === "auto") {
+    searchUrl = "https://www.subito.it/annunci-italia/vendita/auto/?q=" + encodeURIComponent(dest);
+    typeLabel = "Auto usata";
+  } else {
+    searchUrl = "https://www.subito.it/annunci-italia/affitto-vacanze/case-vacanza/?q=" + encodeURIComponent(dest);
+    typeLabel = "Affitto vacanze";
+  }
   var runId = await apifyRun("apify~cheerio-scraper", {
     startUrls: [{ url: searchUrl }],
     pageFunction: `async function pageFunction(context) {
@@ -783,7 +902,7 @@ async function searchSubito(dest, keys) {
     return {
       platform: "subito",
       name:     item.title||"Annuncio Subito",
-      type:     "Affitto vacanze",
+      type:     typeLabel,
       price:    item.price||"",
       phone:    item.phone||ct.phone||null,
       email:    ct.email, whatsapp: ct.whatsapp,
@@ -856,7 +975,9 @@ async function searchImmobiliare(dest, keys) {
 }
 
 // ─── RUN SEARCH ───────────────────────────────────────────────────────────────
-async function runSearch(dest, mode, req, keys, onLog) {
+async function runSearch(dest, mode, req, keys, onLog, category) {
+  category = category || "immobili";
+  var isBoatCar = category === "barche" || category === "auto";
   var hasAnyKey = keys.apify || keys.serper;
   if (!hasAnyKey && !IS_VERCEL) throw new Error("Configura almeno una API key.");
 
@@ -895,36 +1016,52 @@ async function runSearch(dest, mode, req, keys, onLog) {
   var tasks = [];
 
   if (IS_VERCEL || keys.serper) {
-    tasks.push(wrap("Google Maps", function(){return searchGoogleMaps(dest,mode,req,keys);}));
-    tasks.push(wrap("Gruppi Facebook", function(){return searchFacebookGroups(dest,keys);}));
-    tasks.push(wrap("Telegram Annunci", function(){return searchTelegramSerper(dest,keys);}));
+    tasks.push(wrap("Google Maps",     function(){return searchGoogleMaps(dest,mode,req,keys,category);}));
+    tasks.push(wrap("Gruppi Facebook", function(){return searchFacebookGroups(dest,keys,category);}));
+    tasks.push(wrap("Telegram Annunci",function(){return searchTelegramSerper(dest,keys,category);}));
   }
 
   if (IS_VERCEL) {
-    tasks.push(wrap("MediaVacanze", function(){return searchMediaVacanze(dest,req);}));
-    tasks.push(wrap("Idealista",    function(){return searchIdealista(dest,req);}));
+    if (!isBoatCar) {
+      tasks.push(wrap("MediaVacanze", function(){return searchMediaVacanze(dest,req);}));
+      tasks.push(wrap("Idealista",    function(){return searchIdealista(dest,req);}));
+    }
     tasks.push(wrap("Telegram",     function(){return searchTelegramPublic(dest);}));
   }
 
   if (IS_VERCEL) {
-    tasks.push(wrap("Instagram",    function(){return searchInstagram(dest,keys);}));
-    tasks.push(wrap("Facebook",     function(){return searchFacebook(dest,keys);}));
-    tasks.push(wrap("Immobiliare",  function(){return searchImmobiliare(dest,keys);}));
-    tasks.push(wrap("Subito.it",    function(){return searchSubito(dest,keys);}));
-    tasks.push(wrap("VRBO",         function(){return searchVRBO(dest,keys);}));
-    tasks.push(wrap("Airbnb",       function(){return searchAirbnbApify(dest,keys);}));
+    tasks.push(wrap("Instagram", function(){return searchInstagram(dest,keys,category);}));
+    tasks.push(wrap("Facebook",  function(){return searchFacebook(dest,keys,category);}));
+    tasks.push(wrap("Subito.it", function(){return searchSubito(dest,keys,category);}));
+    if (!isBoatCar) {
+      tasks.push(wrap("Immobiliare", function(){return searchImmobiliare(dest,keys);}));
+      tasks.push(wrap("VRBO",        function(){return searchVRBO(dest,keys);}));
+      tasks.push(wrap("Airbnb",      function(){return searchAirbnbApify(dest,keys);}));
+    }
   }
 
   if (!tasks.length) throw new Error("Nessun canale disponibile. Configura le API key.");
 
   await Promise.allSettled(tasks);
 
-  all.sort(function(a,b) {
-    if (req && a.matchReasons.length !== b.matchReasons.length) {
-      return b.matchReasons.length - a.matchReasons.length;
+  function sortLeads(list) {
+    if (isBoatCar) {
+      list.sort(function(a,b) {
+        var pa = parsePrice(a.price), pb = parsePrice(b.price);
+        if (pa !== pb) return pa - pb;
+        return b.score - a.score;
+      });
+    } else {
+      list.sort(function(a,b) {
+        if (req && a.matchReasons.length !== b.matchReasons.length) {
+          return b.matchReasons.length - a.matchReasons.length;
+        }
+        return b.score - a.score;
+      });
     }
-    return b.score - a.score;
-  });
+  }
+
+  sortLeads(all);
 
   var enriched = await runEnrichment(all, keys, onLog);
 
@@ -937,7 +1074,7 @@ async function runSearch(dest, mode, req, keys, onLog) {
       scoreFlags: sc.flags, matchReasons: sc.matchReasons,
     });
   });
-  enriched.sort(function(a,b) { return b.score-a.score; });
+  sortLeads(enriched);
 
   return enriched;
 }
@@ -1449,7 +1586,8 @@ export default function App() {
   var [busy,         setBusy]         = useState(false);
   var [apiKeys,      setApiKeys]      = useState({apify:"",serper:""});
   var [showSettings, setShowSettings] = useState(false);
-  var [searchMode,   setSearchMode]   = useState("all");
+  var [searchMode,     setSearchMode]     = useState("all");
+  var [searchCategory, setSearchCategory] = useState("immobili");
   var [showLog,      setShowLog]      = useState(false);
   var [logs,         setLogs]         = useState([]);
   var [parsedReq,    setParsedReq]    = useState(null);
@@ -1547,7 +1685,7 @@ export default function App() {
     try {
       var req = null;
       try {
-        var raw = await callClaude(text, NLP_PROMPT);
+        var raw = await callClaude(text, getNlpPrompt(searchCategory));
         req = parseJSON(raw);
         if (req && req.destination) {
           setParsedReq(req);
@@ -1564,13 +1702,13 @@ export default function App() {
       }
 
       var dest = (req&&req.destination) ? req.destination : text.split(/[\s,]+/)[0];
-      addLog("info","Ricerca proprietari: "+dest+" ("+searchMode+")");
+      addLog("info","Ricerca "+searchCategory+": "+dest+" ("+searchMode+")");
 
       var leads = await runSearch(dest, searchMode, req, apiKeys, function(label, status) {
         if (status==="loading") addLog("info", label+" → avviato");
         else if (status.startsWith("done:")) addLog("success", label+" → "+status.replace("done:","")+". risultati");
         else if (status.startsWith("error:")) addLog("error", label+" → "+status.replace("error:",""));
-      });
+      }, searchCategory);
 
       setBusy(false);
 
@@ -1585,8 +1723,17 @@ export default function App() {
       var high = leads.filter(function(l){return l.priority==="HIGH";}).length;
       var wa   = leads.filter(function(l){return l.whatsapp;}).length;
       var lic  = leads.filter(function(l){return l.licenza;}).length;
+      var isBoatCarSend = searchCategory === "barche" || searchCategory === "auto";
+      var catLabel = searchCategory === "barche" ? "annunci barche"
+                   : searchCategory === "auto"   ? "annunci auto"
+                   : "proprietari";
+      var withPrice = leads.filter(function(l){return l.price&&l.price!=="";});
+      var minPrice  = withPrice.length ? withPrice.reduce(function(m,l){return parsePrice(l.price)<parsePrice(m.price)?l:m;}) : null;
+      var summaryExtra = isBoatCarSend
+        ? (minPrice ? " · prezzo min "+minPrice.price : "") + " · "+withPrice.length+" con prezzo"
+        : (wa?" · "+wa+" con WhatsApp":"") + (lic?" · "+lic+" con licenza":"");
       pushMsg("assistant",
-        "Trovati "+leads.length+" proprietari per "+dest+" — "+high+" HIGH priority · "+wa+" con WhatsApp"+(lic?" · "+lic+" con licenza":""),
+        "Trovati "+leads.length+" "+catLabel+" per "+dest+" — "+high+" HIGH priority"+summaryExtra,
         leads
       );
 
@@ -1601,14 +1748,31 @@ export default function App() {
     if (e.key==="Enter"&&!e.shiftKey) { e.preventDefault(); send(); }
   }
 
-  var SUGGESTIONS = [
-    "Appartamenti Roma - trova proprietari privati con licenza",
-    "Milano affitti brevi - proprietari diretti luglio agosto",
-    "Ibiza villa luglio agosto budget 3000 settimana",
-    "Sardegna casa vacanze agosto 2026 privato",
-    "Mykonos villa stagionale maggio-settembre",
-    "Roma","Milano","Firenze","Napoli",
-  ];
+  var SUGGESTIONS_BY_CAT = {
+    immobili: [
+      "Appartamenti Roma - trova proprietari privati con licenza",
+      "Milano affitti brevi - proprietari diretti luglio agosto",
+      "Ibiza villa luglio agosto budget 3000 settimana",
+      "Sardegna casa vacanze agosto 2026 privato",
+      "Mykonos villa stagionale maggio-settembre",
+      "Roma","Milano","Firenze","Napoli",
+    ],
+    barche: [
+      "Noleggio barca a vela Sardegna budget 2000 settimana",
+      "Gommone noleggio Costiera Amalfitana estate",
+      "Barca a motore Sicilia luglio agosto privato",
+      "Catamarano Grecia charter prezzi bassi",
+      "Venezia","Napoli","Palermo","Olbia",
+    ],
+    auto: [
+      "Auto usata Roma budget 10000 privato",
+      "Milano auto usate benzina meno di 8000 euro",
+      "Napoli auto privato km bassi 2020 2021",
+      "Fiat Panda usata tutta Italia prezzo basso",
+      "Roma","Milano","Torino","Napoli",
+    ],
+  };
+  var SUGGESTIONS = SUGGESTIONS_BY_CAT[searchCategory] || SUGGESTIONS_BY_CAT.immobili;
 
   var hasKeys = IS_VERCEL || apiKeys.apify || apiKeys.serper;
   var hasErrors = logs.some(function(l){return l.level==="error";});
@@ -1689,11 +1853,33 @@ export default function App() {
         </div>
       </div>
 
+      {/* CATEGORY SELECTOR */}
+      <div style={{padding:"5px 14px",borderBottom:"1px solid rgba(255,255,255,0.04)",
+        background:"rgba(9,9,11,0.95)",flexShrink:0}}>
+        <div style={{display:"flex",gap:3,maxWidth:720,margin:"0 auto"}}>
+          {SEARCH_CATEGORIES.map(function(cat) {
+            var isA = searchCategory===cat.id;
+            var catCol = cat.id==="barche"?"#06B6D4":cat.id==="auto"?"#F59E0B":"#6366F1";
+            return (
+              <button key={cat.id}
+                onClick={function(){setSearchCategory(cat.id);setSearchMode("all");}}
+                className="ps-mode-btn"
+                style={{fontSize:12,padding:"5px 16px",borderRadius:8,whiteSpace:"nowrap",
+                  border:"1px solid "+(isA?catCol+"70":catCol+"18"),
+                  background:isA?catCol+"20":"transparent",
+                  color:isA?catCol:"#475569",cursor:"pointer",fontWeight:isA?700:500}}>
+                {cat.id==="barche"?"⛵ ":cat.id==="auto"?"🚗 ":"🏠 "}{cat.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
       {/* MODE SELECTOR */}
       <div className="lx-modes" style={{padding:"6px 14px",borderBottom:"1px solid rgba(255,255,255,0.04)",
         background:"rgba(9,9,11,0.8)",flexShrink:0,overflowX:"auto"}}>
         <div style={{display:"flex",gap:4,maxWidth:720,margin:"0 auto",width:"max-content",minWidth:"100%"}}>
-          {SEARCH_MODES.map(function(m) {
+          {(SEARCH_MODES_BY_CAT[searchCategory]||SEARCH_MODES_BY_CAT.immobili).map(function(m) {
             var isA = searchMode===m.id;
             return (
               <button key={m.id} onClick={function(){setSearchMode(m.id);}}
@@ -1734,8 +1920,12 @@ export default function App() {
                   Property<span style={{color:"#F59E0B"}}>Scout</span>
                 </div>
                 <div style={{fontSize:13,color:"#475569",lineHeight:2,maxWidth:420,margin:"0 auto 4px"}}>
-                  Trova proprietari di appartamenti reali con cui collaborare<br/>
-                  <span style={{fontSize:11,color:"#374151"}}>Ricerca su 9 canali · AI scoring · Contatti diretti</span>
+                  {searchCategory==="barche"
+                    ? <>Trova barche al prezzo più basso — noleggio o vendita<br/><span style={{fontSize:11,color:"#374151"}}>Ricerca su 6 canali · Ordine per prezzo · Contatti diretti</span></>
+                    : searchCategory==="auto"
+                    ? <>Trova auto usate al prezzo più basso nella tua zona<br/><span style={{fontSize:11,color:"#374151"}}>Ricerca su 6 canali · Ordine per prezzo · Privati e concessionari</span></>
+                    : <>Trova proprietari di appartamenti reali con cui collaborare<br/><span style={{fontSize:11,color:"#374151"}}>Ricerca su 9 canali · AI scoring · Contatti diretti</span></>
+                  }
                 </div>
 
                 {/* Channel pills */}
