@@ -1,5 +1,5 @@
 /**
- * LuXy Club — RapidAPI Proxy
+ * Property Scout — RapidAPI Proxy
  * Vercel serverless function che fa da proxy per *.p.rapidapi.com
  *
  * Uso: POST /api/rapid

@@ -1476,7 +1476,7 @@ export default function App() {
       if (r&&r.value) { try { setAllLeads(JSON.parse(r.value)); } catch(e){} }
       else {
         // migrate from old key
-        storage.get("luxy:leads").then(function(r2) {
+        storage.get("property_scout:leads").then(function(r2) {
           if (r2&&r2.value) { try { setAllLeads(JSON.parse(r2.value)); } catch(e){} }
         }).catch(function(){});
       }
@@ -1489,7 +1489,7 @@ export default function App() {
         try { setApiKeys(JSON.parse(r.value)); return; } catch(e){}
       }
       // migrate from old storage key
-      return storage.get("luxy:keys").then(function(r2) {
+      return storage.get("property_scout:keys").then(function(r2) {
         if (r2&&r2.value) {
           try {
             var old2 = JSON.parse(r2.value);

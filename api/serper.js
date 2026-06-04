@@ -1,5 +1,5 @@
 /**
- * LuXy Club — Serper.dev Proxy
+ * Property Scout — Serper.dev Proxy
  * Richiede SERPER_API_KEY come variabile d'ambiente su Vercel
  * oppure passata nel body come { serperKey }
  */

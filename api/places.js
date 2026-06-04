@@ -1,5 +1,5 @@
 /**
- * LuXy Club — Google Places Proxy
+ * Property Scout — Google Places Proxy
  * Mantiene la API key Google server-side (non esposta nel browser)
  *
  * Uso: POST /api/places

@@ -1,5 +1,5 @@
 /**
- * LuXy Club — Claude AI Proxy
+ * Property Scout — Claude AI Proxy
  * Vercel serverless function che fa da proxy per api.anthropic.com
  * Necessario perché la API key Anthropic funziona solo nell'artifact Claude.ai
  * Su Vercel la chiave va messa come variabile d'ambiente ANTHROPIC_API_KEY

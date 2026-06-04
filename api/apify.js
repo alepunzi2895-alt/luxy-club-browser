@@ -1,5 +1,5 @@
 /**
- * LuXy Club — Apify Proxy
+ * Property Scout — Apify Proxy
  * Handles memory param in path: /acts/actor~id/runs?memory=128
  */
 export default async function handler(req, res) {

@@ -1,4 +1,4 @@
-# LuXy Club — Partner Discovery v3
+# Property Scout
 
 Sistema di discovery fornitori turistici con 8 canali reali, NLP, scoring AI e generazione messaggi.
 
@@ -25,7 +25,7 @@ Settings > Environment Variables:
 
 ```bash
 git add .
-git commit -m "LuXy v3"
+git commit -m "Property Scout v1"
 git push origin main --force
 ```
 

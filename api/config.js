@@ -1,5 +1,5 @@
 /**
- * LuXy Club — Config endpoint
+ * Property Scout — Config endpoint
  * Serves API keys from Vercel env vars to the frontend
  * So the user never needs to re-enter them after a deploy
  */

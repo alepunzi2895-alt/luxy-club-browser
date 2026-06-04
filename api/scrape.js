@@ -1,5 +1,5 @@
 /**
- * LuXy Club — Scraping Proxy
+ * Property Scout — Scraping Proxy
  * Fetcha URL esterni server-side (bypassa CORS del browser)
  * Fa parsing HTML e restituisce lead strutturati
  */
