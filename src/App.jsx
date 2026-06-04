@@ -4,14 +4,14 @@ import * as XLSX from "xlsx";
 // ─── CONSTANTS ────────────────────────────────────────────────────────────────
 var IS_VERCEL = typeof window !== "undefined" &&
   (window.location.hostname.endsWith(".vercel.app") ||
-   window.location.hostname === "localhost" ||
-   window.location.hostname.endsWith(".luxy.club"));
+   window.location.hostname === "localhost");
 
 var SEARCH_MODES = [
-  { id:"all",      label:"Tutto" },
-  { id:"privati",  label:"Solo Privati" },
-  { id:"villaggi", label:"Villaggi & Resort" },
-  { id:"agenzie",  label:"Agenzie Collaborazione" },
+  { id:"all",          label:"Tutto" },
+  { id:"privati",      label:"Solo Privati" },
+  { id:"proprietari",  label:"Proprietari Diretti" },
+  { id:"villaggi",     label:"Villaggi & Resort" },
+  { id:"agenzie",      label:"Agenzie Collaborazione" },
 ];
 
 var PLATFORMS = {
@@ -23,28 +23,39 @@ var PLATFORMS = {
   subito:      { label:"Subito.it",      color:"#CC0000" },
   idealista:   { label:"Idealista",      color:"#003399" },
   immobiliare: { label:"Immobiliare.it", color:"#0E4CB2" },
+  airbnb:      { label:"Airbnb",         color:"#FF5A5F" },
   homeaway:    { label:"VRBO",           color:"#2196F3" },
   vrbo:        { label:"VRBO",           color:"#2196F3" },
 };
 
 var TELEGRAM_MAP = {
-  ibiza:      ["ibizalife","ibizarental","ibizahouse","eivissalife"],
-  formentera: ["formenteralife","formenterarental"],
-  sardegna:   ["sardegnarental","affittisardegna","sardegnacase","sardinia"],
-  sicilia:    ["siciliaaffitti","sicilyrental"],
-  puglia:     ["pugliaaffitti","pugliavacanze"],
-  mykonos:    ["mykonoslife","mykonosrental","mykonosgreece"],
-  bali:       ["balilife","balirentals","balivilla"],
-  roma:       ["romaaffitti","roomsrome"],
-  milano:     ["milanoflatrent","milanorental"],
-  default:    ["vacanzeitalia","affittivacanze","rentitaly","italyvillas"],
+  ibiza:       ["ibizalife","ibizarental","ibizahouse","eivissalife","ibizaproperties"],
+  formentera:  ["formenteralife","formenterarental","formenteracase"],
+  sardegna:    ["sardegnarental","affittisardegna","sardegnacase","sardinia","sardiniarentals"],
+  sicilia:     ["siciliaaffitti","sicilyrental","siciliavacanze","siciliacase"],
+  puglia:      ["pugliaaffitti","pugliavacanze","apuliarentals","pugliacase"],
+  mykonos:     ["mykonoslife","mykonosrental","mykonosgreece","mykonoshomes"],
+  bali:        ["balilife","balirentals","balivilla","baliproperties"],
+  roma:        ["romaaffitti","roomsrome","romacase","romaapartments","affittiroma"],
+  milano:      ["milanoflatrent","milanorental","milanoaffitti","milanocasa"],
+  napoli:      ["napoliaffitti","napolicase","naplesrent","napoliapartments"],
+  firenze:     ["firenzeaffitti","florencerent","firenzecasa","florenceapartments"],
+  venezia:     ["veneziaaffitti","venicerentals","veneziacasa"],
+  torino:      ["torinoaffitti","torinocase","torinorent"],
+  palermo:     ["palermoaffitti","palermocasa","palermovacanze"],
+  rimini:      ["riminisummer","riminivacanze","riminiapartments"],
+  toscana:     ["toscanarental","tuscanyrentals","toscanacase","tuscanyvillas"],
+  amalfi:      ["amalficoast","costaamalfi","amalfirentals","amalfivilla"],
+  bologna:     ["bolognaaffitti","bolognacasa","bolognaapartments"],
+  bari:        ["bariaffitti","baricasa","barirentals"],
+  default:     ["vacanzeitalia","affittivacanze","rentitaly","italyvillas","affittibrevi","caseitalia"],
 };
 
-var NLP_PROMPT = "Sei un parser di richieste alloggio. Estrai i parametri dal testo e rispondi SOLO con JSON valido, nessun testo extra. " +
+var NLP_PROMPT = "Sei un parser di richieste di ricerca proprietari di immobili. Estrai i parametri dal testo e rispondi SOLO con JSON valido, nessun testo extra. " +
   "Schema: {\"destination\":\"citta o zona\",\"roomType\":\"intera|condivisa|stanza\",\"people\":2,\"dateFrom\":\"YYYY-MM o mese\",\"dateTo\":\"YYYY-MM o mese\"," +
-  "\"budgetMax\":1500,\"budgetPeriod\":\"notte|settimana|mese\",\"durationType\":\"stagionale|annuale|breve\"} " +
+  "\"budgetMax\":1500,\"budgetPeriod\":\"notte|settimana|mese\",\"durationType\":\"stagionale|annuale|breve\",\"licenza\":false} " +
   "Valori: roomType=intera se appartamento/villa/casa intera; condivisa se stanza in appartamento con altri; stanza se stanza privata con bagno. " +
-  "Metti null per campi non presenti. Non inventare dati.";
+  "licenza=true se menziona licenza, autorizzazione, locazione turistica. Metti null per campi non presenti. Non inventare dati.";
 
 // ─── STORAGE ──────────────────────────────────────────────────────────────────
 var storage = (function() {
@@ -79,20 +90,20 @@ var storage = (function() {
 // ─── UTILS ────────────────────────────────────────────────────────────────────
 function normKey(t) {
   return (t||"").toLowerCase().normalize("NFD")
-    .replace(/[\u0300-\u036f]/g,"").replace(/[^a-z0-9]+/g,"_").replace(/^_|_$/g,"");
+    .replace(/[̀-ͯ]/g,"").replace(/[^a-z0-9]+/g,"_").replace(/^_|_$/g,"");
 }
 
 function detectCountry(dest) {
   var d = normKey(dest);
   var spain = ["ibiza","formentera","maiorca","mallorca","barcellona","madrid","valencia","siviglia","tenerife","gran canaria","lanzarote","fuerteventura","costa brava","costa del sol","marbella","menorca","minorca"];
-  var italy = ["sardegna","sicilia","puglia","toscana","roma","milano","napoli","amalfi","cinque terre","venezia","firenze","bologna","palermo","rimini","riccione","gallipoli","otranto","taormina","siracusa","agrigento","trapani"];
+  var italy = ["sardegna","sicilia","puglia","toscana","roma","milano","napoli","amalfi","cinque terre","venezia","firenze","bologna","palermo","rimini","riccione","gallipoli","otranto","taormina","siracusa","agrigento","trapani","bari","torino"];
   var greece = ["mykonos","santorini","creta","rodi","corfu","corfù","zakynthos","cefalonia","atene","skiathos","paros","naxos","ios","milos"];
   var bali = ["bali","lombok","seminyak","ubud","canggu","uluwatu"];
   if (spain.some(function(s){return d.includes(s);})) return "es";
   if (italy.some(function(s){return d.includes(s);})) return "it";
   if (greece.some(function(s){return d.includes(s);})) return "gr";
   if (bali.some(function(s){return d.includes(s);})) return "id";
-  return "it"; // default Italy
+  return "it";
 }
 
 function parseJSON(t) {
@@ -117,7 +128,6 @@ function extractContacts(text) {
 
 // ─── AIRBNB via APIFY ────────────────────────────────────────────────────────
 async function searchAirbnbApify(dest, keys) {
-  // apify/airbnb-scraper — official Apify actor, free tier
   var cin  = new Date(Date.now()+30*86400000).toISOString().split("T")[0];
   var cout = new Date(Date.now()+37*86400000).toISOString().split("T")[0];
   var runId = await apifyRun("apify~airbnb-scraper", {
@@ -152,10 +162,8 @@ async function searchAirbnbApify(dest, keys) {
 
 // ─── VRBO SEARCH ─────────────────────────────────────────────────────────────
 async function searchVRBO(dest, keys) {
-  // decorative_chimta/vrbo-main-link-scraper — free Apify actor
   var cin  = new Date(Date.now()+60*86400000).toISOString().split("T")[0];
   var cout = new Date(Date.now()+67*86400000).toISOString().split("T")[0];
-  // VRBO search URL format
   var vrboUrl = "https://www.vrbo.com/search?destination=" +
     encodeURIComponent(dest) +
     "&adultsCount=2&startDate=" + cin + "&endDate=" + cout;
@@ -185,14 +193,10 @@ async function searchVRBO(dest, keys) {
 }
 
 // ─── AGENT v4: ENRICHMENT LOOP ───────────────────────────────────────────────
-// For leads missing email/whatsapp, try to find them by:
-// 1. Scraping the lead's website /contact page
-// 2. Searching Google for the name + contact info
 async function enrichLead(lead, serperKey) {
   var enriched = Object.assign({}, lead);
   var found = { email: lead.email, whatsapp: lead.whatsapp, phone: lead.phone };
 
-  // Step 1: Scrape website if available and missing contacts
   if (lead.website && (!found.email && !found.whatsapp)) {
     var contactPages = [
       lead.website.replace(/\/$/, "") + "/contact",
@@ -218,12 +222,11 @@ async function enrichLead(lead, serperKey) {
     }
   }
 
-  // Step 2: Google search for missing contacts (email, phone, WA, website)
   if ((!found.email && !found.whatsapp) && (IS_VERCEL || serperKey) && lead.name) {
     try {
       var queries = [
-        lead.name + " " + (lead.location||"") + " whatsapp email contatti",
-        lead.name + " " + (lead.location||"") + " telefono prenotazioni",
+        lead.name + " " + (lead.location||"") + " whatsapp email contatti proprietario",
+        lead.name + " " + (lead.location||"") + " telefono prenotazioni affitto",
       ];
       for (var qi2=0; qi2<queries.length; qi2++) {
         var res2 = await fetch("/api/serper", {
@@ -232,7 +235,6 @@ async function enrichLead(lead, serperKey) {
         });
         if (res2.ok) {
           var sd = await res2.json();
-          // Extract from snippets
           var snippets = (sd.organic||[]).slice(0,4).map(function(r){
             return (r.snippet||"") + " " + (r.link||"");
           }).join(" ");
@@ -240,10 +242,8 @@ async function enrichLead(lead, serperKey) {
           if (ct2.email)    found.email    = found.email    || ct2.email;
           if (ct2.whatsapp) found.whatsapp  = found.whatsapp || ct2.whatsapp;
           if (ct2.phone)    found.phone    = found.phone    || ct2.phone;
-          // Save first organic result as website if none
           if (!lead.website && sd.organic && sd.organic[0]) {
             var firstLink = sd.organic[0].link;
-            // Only use if not a big OTA
             if (!/airbnb|booking|tripadvisor|vrbo|homeaway/i.test(firstLink)) {
               enriched.website = firstLink;
             }
@@ -254,7 +254,6 @@ async function enrichLead(lead, serperKey) {
     } catch(e) {}
   }
 
-  // Step 3: If we found a website but no contacts, scrape it too
   if (enriched.website && !found.email && !found.whatsapp) {
     var contactPages2 = [
       enriched.website.replace(/\/$/, "") + "/contact",
@@ -276,7 +275,6 @@ async function enrichLead(lead, serperKey) {
     }
   }
 
-  // Apply found contacts
   if (found.email    !== lead.email)    enriched.email    = found.email;
   if (found.whatsapp !== lead.whatsapp) enriched.whatsapp = found.whatsapp;
   if (found.phone    !== lead.phone)    enriched.phone    = found.phone;
@@ -285,11 +283,10 @@ async function enrichLead(lead, serperKey) {
 }
 
 async function runEnrichment(leads, apiKeys, onLog) {
-  // Only enrich HIGH/MEDIUM leads missing both email and whatsapp
   var toEnrich = leads.filter(function(l) {
     return (l.priority === "HIGH" || l.priority === "MEDIUM") &&
            !l.email && !l.whatsapp && (l.website || l.name);
-  }).slice(0, 10); // max 10 to avoid timeout
+  }).slice(0, 10);
 
   if (!toEnrich.length) return leads;
   onLog("Agente v4", "loading");
@@ -328,7 +325,6 @@ function detectSiteLevel(url) {
 function computeScore(s, req) {
   var pts = 0, reasons = [], flags = [], matchReasons = [], penalties = [];
 
-  // Contacts (priority: WA > Phone > Email)
   if (s.whatsapp)                    { pts += 30; reasons.push("WhatsApp diretto"); }
   if (s.phone && !s.whatsapp)        { pts += 20; reasons.push("Telefono diretto"); }
   var eml = (s.email||"").toLowerCase();
@@ -338,38 +334,32 @@ function computeScore(s, req) {
     pts += 8; reasons.push("Email diretta");
   }
 
-  // Independence
   if (s.is_private || s.owner_managed) { pts += 20; reasons.push("Gestore indipendente"); }
   if (s.no_agency)                     { pts += 10; reasons.push("Nessuna agenzia"); }
+  if (s.licenza)                       { pts += 15; reasons.push("Licenza/autorizzazione"); }
 
-  // Website level (core scoring per spec)
   var siteLevel = detectSiteLevel(s.website);
   if (siteLevel === "none")         { pts += 25; reasons.push("Zero presenza online"); }
   else if (siteLevel === "builder") { pts += 20; reasons.push("Sito basilare"); }
   else                              { pts += 5;  reasons.push("Sito professionale"); }
 
-  // Reviews / online visibility
   var rev = parseInt(s.reviews||0);
   if (rev > 0 && rev < 30)  { pts += 15; reasons.push("Pochissime recensioni ("+rev+")"); }
   else if (rev < 80)         { pts += 10; reasons.push("Poche recensioni ("+rev+")"); }
   else if (rev < 250)        { pts += 5; }
   else if (rev > 600)        { flags.push("Alta visibilità"); }
 
-  // Rating
   var rat = parseFloat(s.rating||0);
   if (rat >= 4.8)      { pts += 10; reasons.push("Rating "+rat); }
   else if (rat >= 4.5) { pts += 7; }
 
-  // Extra signals
   if (s.new_listing)   { pts += 8;  reasons.push("Annuncio recente"); }
   if (s.collab_open)   { pts += 12; reasons.push("Aperto a collaborazioni"); }
 
-  // Negatives
   if (s.chain_hotel)             { pts = Math.max(0, pts-30); flags.push("Catena alberghiera"); }
   if (s.booking_engine_advanced) { pts = Math.max(0, pts-20); flags.push("Booking engine avanzato"); }
   if (s.advanced_marketing)      { pts = Math.max(0, pts-10); flags.push("Marketing professionale"); }
 
-  // Request-based adjustments
   if (req) {
     if (req.budgetMax && s.price) {
       var nums = (s.price||"").match(/\d+/g);
@@ -392,6 +382,9 @@ function computeScore(s, req) {
         pts = Math.min(100, pts+15); matchReasons.push("Stanza privata");
       }
     }
+    if (req.licenza && s.licenza) {
+      pts = Math.min(100, pts+15); matchReasons.push("Con licenza");
+    }
   }
 
   var score = Math.min(100, Math.max(0, Math.round(pts)));
@@ -409,7 +402,6 @@ async function callClaude(text, system, retries) {
     : JSON.stringify({ model:"claude-sonnet-4-20250514", max_tokens:600, system:system, messages:[{role:"user",content:text}] });
   var res = await fetch(url, { method:"POST", headers:{"Content-Type":"application/json"}, body:body });
   if (!res.ok) {
-    // 529 = overloaded — retry up to 2 times with backoff
     if ((res.status===529 || res.status===503 || res.status===429) && retries < 2) {
       await new Promise(function(r){setTimeout(r, (retries+1)*2000);});
       return callClaude(text, system, retries+1);
@@ -487,7 +479,6 @@ async function apifyItems(datasetId, apiKey, limit) {
 
 // ─── CHANNEL SCRAPERS ─────────────────────────────────────────────────────────
 
-// Types to EXCLUDE from Google Maps results
 var MAPS_EXCLUDE_TYPES = [
   "real_estate_agency","travel_agency","car_rental","car_dealer","gas_station",
   "supermarket","grocery","store","shop","restaurant","bar","cafe","gym","spa",
@@ -496,7 +487,6 @@ var MAPS_EXCLUDE_TYPES = [
   "stadium","night_club","casino","airport","transit_station","bus_station",
   "group","community","association","club",
 ];
-// Types to INCLUDE
 var MAPS_INCLUDE_TYPES = [
   "lodging","hotel","motel","guest_house","bed_and_breakfast","apartment","resort",
   "villa","hostel","campground","vacation_rental","holiday_rental","agriturismo",
@@ -506,32 +496,32 @@ var MAPS_INCLUDE_TYPES = [
 function isTouristAccommodation(p) {
   var name = (p.title||p.name||"").toLowerCase();
   var type = (p.type||p.category||"").toLowerCase();
-  // Explicit exclude
   if (MAPS_EXCLUDE_TYPES.some(function(t){return type.includes(t);})) {
-    // But override if name clearly says accommodation
     if (!/(villa|hotel|b&b|appartamento|resort|hostel|agriturismo|rental|affitto|vacanz|suite|rooms?)/.test(name)) return false;
   }
-  // Explicit include by type
   if (MAPS_INCLUDE_TYPES.some(function(t){return type.includes(t);})) return true;
-  // Include by name keywords
   if (/(villa|hotel|b&b|b & b|appartamento|resort|hostel|agriturismo|rental|affitto|vacanz|suite|rooms?|albergo|pensione|locanda|masseria|trullo|chalet|bungalow|glamping|camping)/i.test(name)) return true;
-  // Exclude common non-accommodation patterns
   if (/(agenzia|studio|ufficio|negozio|farmacia|supermercato|centro|servizi)/i.test(name)) return false;
-  return true; // default allow
+  return true;
 }
 
 async function searchGoogleMaps(dest, mode, req, keys) {
-  // Run multiple targeted queries in parallel for better coverage
   var queries = [];
   if (mode === "villaggi") {
     queries = [dest + " resort villaggi turistici", dest + " hotel boutique"];
   } else if (mode === "agenzie") {
     queries = [dest + " agenzia affitti vacanze", dest + " property management"];
+  } else if (mode === "proprietari") {
+    queries = [
+      dest + " affittacamere privato licenza turistica",
+      dest + " proprietario diretto affitto appartamento",
+      dest + " locazione turistica autorizzazione",
+    ];
   } else {
     queries = [
-      dest + " villa appartamento affitto vacanze",
+      dest + " villa appartamento affitto vacanze privato",
       dest + " bed breakfast hotel boutique",
-      dest + " casa vacanze privato",
+      dest + " casa vacanze privato proprietario",
     ];
   }
 
@@ -554,7 +544,7 @@ async function searchGoogleMaps(dest, mode, req, keys) {
   return allPlaces.slice(0,20).map(function(p) {
     var siteLevel = detectSiteLevel(p.website);
     var isChain = !!(p.name && /marriott|hilton|hyatt|ibis|nh hotel|holiday inn|best western|accor|melia|sheraton|wyndham|radisson|intercontinental|four seasons/i.test(p.name));
-    // Build Google Maps direct link
+    var licenza = !!(p.name && /licenza|autorizzaz|locazione turistica|affittacamere|b&b/i.test(p.name+"|"+(p.type||"")));
     var mapsLink = p.link || p.mapsUrl;
     if (!mapsLink) {
       if (p.placeId) mapsLink = "https://www.google.com/maps/place/?q=place_id:" + p.placeId;
@@ -569,6 +559,7 @@ async function searchGoogleMaps(dest, mode, req, keys) {
       phone:     p.phoneNumber||p.phone||null,
       rating:    p.rating ? parseFloat(p.rating) : null,
       reviews:   p.reviews ? parseInt(p.reviews) : null,
+      licenza:   licenza,
       is_private:    !p.website || siteLevel==="none" || siteLevel==="builder",
       owner_managed: !p.website || siteLevel==="none",
       no_agency:     mode!=="agenzie",
@@ -610,82 +601,117 @@ async function searchInstagram(dest, keys) {
   });
 }
 
+// ─── FACEBOOK PAGES + GROUPS ──────────────────────────────────────────────────
 async function searchFacebook(dest, keys) {
-  // Step 1: usa Serper per trovare URL di pagine Facebook reali
-  // (facebook-pages-scraper richiede URL diretti di pagine, non URL di ricerca)
-  var fbPageUrls = [];
-  try {
-    var queries = [
-      "site:facebook.com affitti vacanze " + dest,
-      "site:facebook.com villa rental " + dest,
-      "site:facebook.com case vacanze " + dest,
-    ];
-    for (var qi = 0; qi < queries.length; qi++) {
-      var res = await fetch("/api/serper", {
-        method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ query: queries[qi], serperKey: keys.serper||"", type: "search" })
+  var queries = [
+    "affitti vacanze " + dest,
+    "case vacanze " + dest,
+    "villa rental " + dest,
+  ];
+  var all = [], seen = {};
+  for (var qi = 0; qi < queries.length; qi++) {
+    try {
+      var runId = await apifyRun("apify~facebook-pages-scraper",{
+        startUrls:[{
+          url: "https://www.facebook.com/search/pages/?q=" + encodeURIComponent(queries[qi])
+        }],
+        maxPosts: 3,
+        maxReviews: 0,
+      }, keys.apify);
+      var dsId = await apifyWait(runId, keys.apify);
+      var items = await apifyItems(dsId, keys.apify, 10);
+      items.filter(function(i){return i.name||i.title;}).forEach(function(item) {
+        var k = (item.name||item.title||"").toLowerCase().replace(/\s/g,"");
+        if (seen[k]) return; seen[k]=true;
+        var ct = extractContacts((item.phone||"")+" "+(item.email||"")+" "+(item.about||"")+" "+(item.description||""));
+        all.push({
+          platform:  "facebook",
+          name:      item.name||item.title||"",
+          type:      "Pagina Facebook",
+          location:  item.city||dest,
+          website:   item.website||null,
+          phone:     item.phone||ct.phone||null,
+          email:     item.email||ct.email||null,
+          whatsapp:  ct.whatsapp,
+          is_private:    false,
+          owner_managed: false,
+          no_agency:     false,
+          src: item.url||item.pageUrl||"",
+        });
       });
-      if (!res.ok) continue;
-      var data = await res.json();
-      (data.organic||[]).forEach(function(r) {
-        var url = r.link||"";
-        // Solo pagine Facebook — no profili personali o gruppi
-        if (url.includes("facebook.com") &&
-            !url.includes("/groups/") &&
-            !url.includes("/profile.php") &&
-            !url.includes("facebook.com/watch") &&
-            fbPageUrls.length < 6) {
-          fbPageUrls.push({ url: url });
-        }
-      });
-      if (fbPageUrls.length >= 4) break;
-    }
-  } catch(e) {}
-
-  if (!fbPageUrls.length) return [];
-
-  // Step 2: scrapa le pagine Facebook trovate con l'actor
-  try {
-    var runId = await apifyRun("apify~facebook-pages-scraper", {
-      startUrls: fbPageUrls,
-      maxPosts: 5,
-      maxReviews: 0,
-    }, keys.apify||"");
-    var dsId  = await apifyWait(runId, keys.apify||"");
-    var items = await apifyItems(dsId, keys.apify||"", 15);
-    var seen = {};
-    return items.filter(function(i){return i.name||i.title;}).map(function(item) {
-      var ct = extractContacts(
-        (item.phone||"")+" "+(item.email||"")+" "+
-        (item.about||"")+" "+(item.description||"")
-      );
-      return {
-        platform:  "facebook",
-        name:      item.name||item.title||"",
-        type:      "Pagina Facebook",
-        location:  item.city||dest,
-        website:   item.website||null,
-        phone:     item.phone||ct.phone||null,
-        email:     item.email||ct.email||null,
-        whatsapp:  ct.whatsapp,
-        is_private:    !!(item.about && !/agenzia|agency/i.test(item.about)),
-        owner_managed: false,
-        src: item.url||item.pageUrl||"",
-      };
-    });
-  } catch(e) {
-    // Fallback: restituisci almeno i link trovati da Serper come lead
-    return fbPageUrls.map(function(p, i) {
-      return {
-        platform: "facebook",
-        name:     "Pagina Facebook " + dest + " #" + (i+1),
-        type:     "Pagina Facebook",
-        location: dest,
-        is_private: false,
-        src: p.url,
-      };
-    });
+      if (all.length >= 10) break;
+    } catch(e) {}
   }
+  return all;
+}
+
+// Cerca in gruppi Facebook via Google/Serper (site:facebook.com/groups)
+async function searchFacebookGroups(dest, keys) {
+  if (!IS_VERCEL && !keys.serper) return [];
+  var queries = [
+    'site:facebook.com/groups "' + dest + '" affitto appartamento proprietario',
+    'site:facebook.com/groups "' + dest + '" case vacanze privati',
+    'site:facebook.com/groups affitto privato "' + dest + '"',
+  ];
+  var all = [], seen = {};
+  for (var qi = 0; qi < queries.length; qi++) {
+    try {
+      var data = await fetchSerper(queries[qi], keys.serper);
+      (data.organic||[]).forEach(function(r) {
+        if (!r.link || !r.link.includes("facebook.com/groups")) return;
+        var k = r.link.slice(-30);
+        if (seen[k]) return; seen[k] = true;
+        var ct = extractContacts(r.snippet||"");
+        all.push({
+          platform:  "facebook",
+          name:      r.title || ("Gruppo FB – " + dest),
+          type:      "Gruppo Facebook",
+          location:  dest,
+          bio:       r.snippet||"",
+          phone:     ct.phone||null,
+          email:     ct.email||null,
+          whatsapp:  ct.whatsapp||null,
+          is_private:    true,
+          owner_managed: true,
+          no_agency:     true,
+          src:       r.link,
+        });
+      });
+    } catch(e) {}
+    if (all.length >= 12) break;
+  }
+  return all;
+}
+
+// Cerca annunci su Telegram via Google/Serper (site:t.me)
+async function searchTelegramSerper(dest, keys) {
+  if (!IS_VERCEL && !keys.serper) return [];
+  var query = 'site:t.me "' + dest + '" affitto appartamento proprietario';
+  try {
+    var data = await fetchSerper(query, keys.serper);
+    var all = [], seen = {};
+    (data.organic||[]).forEach(function(r) {
+      if (!r.link || !r.link.includes("t.me")) return;
+      var k = r.link.slice(-20);
+      if (seen[k]) return; seen[k] = true;
+      var ct = extractContacts(r.snippet||"");
+      all.push({
+        platform:  "telegram",
+        name:      r.title || ("Canale Telegram – " + dest),
+        type:      "Post Telegram",
+        location:  dest,
+        bio:       r.snippet||"",
+        phone:     ct.phone||null,
+        email:     ct.email||null,
+        whatsapp:  ct.whatsapp||null,
+        is_private:    true,
+        owner_managed: true,
+        no_agency:     true,
+        src:       r.link,
+      });
+    });
+    return all;
+  } catch(e) { return []; }
 }
 
 async function searchTelegramPublic(dest) {
@@ -696,11 +722,9 @@ async function searchTelegramPublic(dest) {
     try {
       var url = "https://t.me/s/" + channels[i];
       var items = await fetchScrape(url, "telegram");
-      // Add channel info + proper telegram links
       items.forEach(function(item) {
         item.telegram_channel = channels[i];
         item.channel_url = "https://t.me/" + channels[i];
-        // If we have a message ID, link directly to it
         if (item.msg_id) {
           item.src = "https://t.me/" + channels[i] + "/" + item.msg_id;
         } else {
@@ -714,11 +738,9 @@ async function searchTelegramPublic(dest) {
 }
 
 async function searchMediaVacanze(dest, req) {
-  // casevacanza.it — simpler HTML, less bot protection, Italian portal
   var encoded = encodeURIComponent(dest);
   var url = "https://www.casevacanza.it/search?q=" + encoded + "&categoria=case-vacanze";
   var results = await fetchScrape(url, "casevacanza").catch(function(){return [];});
-  // Fallback: holidu.it aggregator
   if (!results.length) {
     var slug = normKey(dest).replace(/_/g,"-");
     url = "https://www.holidu.it/search?location=" + encoded;
@@ -728,156 +750,110 @@ async function searchMediaVacanze(dest, req) {
 }
 
 async function searchSubito(dest, keys) {
-  // Serper: cerca annunci Subito specifici per la destinazione con link diretto
-  try {
-    var res = await fetch("/api/serper", {
-      method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({
-        query: "site:subito.it/annunci affitto vacanze " + dest + " appartamento villa",
-        serperKey: keys.serper||"",
-        type: "search"
-      })
-    });
-    if (!res.ok) throw new Error("Serper " + res.status);
-    var data = await res.json();
-    var organic = data.organic||[];
-    var destLower = dest.toLowerCase();
-    return organic.filter(function(r) {
-      if (!r.link || !r.link.includes("subito.it")) return false;
-      // Filtra: link deve essere un annuncio reale (non pagina di ricerca)
-      if (r.link.includes("/annunci-italia/") || r.link.includes("subito.it/?")) return false;
-      // Controlla che il titolo o snippet contenga la destinazione
-      var text = ((r.title||"")+" "+(r.snippet||"")).toLowerCase();
-      return text.includes(destLower) ||
-             text.includes("vacanz") || text.includes("affitto") || text.includes("villa");
-    }).map(function(r) {
-      var ct = extractContacts((r.snippet||"")+" "+(r.title||""));
-      var priceM = (r.snippet||"").match(/(\d[\d.,]+)\s*€/);
-      // Pulisci il titolo da "subito.it ›" ecc
-      var name = (r.title||"Annuncio Subito").replace(/subito\.it\s*[›>|]\s*/gi,"").trim();
-      return {
-        platform:  "subito",
-        name:      name||"Annuncio Subito",
-        type:      "Affitto vacanze",
-        location:  dest,
-        price:     priceM ? priceM[1]+"€" : "",
-        email:     ct.email,
-        whatsapp:  ct.whatsapp,
-        phone:     ct.phone,
-        is_private:    true,
-        owner_managed: true,
-        no_agency:     true,
-        src:       r.link, // link diretto all'annuncio
-      };
-    });
-  } catch(e) {
-    return [];
-  }
+  var searchUrl = "https://www.subito.it/annunci-italia/affitto-vacanze/case-vacanza/?q=" + encodeURIComponent(dest);
+  var runId = await apifyRun("apify~cheerio-scraper", {
+    startUrls: [{ url: searchUrl }],
+    pageFunction: `async function pageFunction(context) {
+      const { $, request } = context;
+      const items = [];
+      $('[data-item-id]').each(function() {
+        const el = $(this);
+        const title = el.find('[class*="title"]').first().text().trim();
+        const price = el.find('[class*="price"]').first().text().trim();
+        const link  = el.find('a').first().attr('href');
+        const phone = el.find('[class*="phone"]').first().text().trim();
+        if (title || price) {
+          items.push({ title, price, phone,
+            url: link ? ('https://www.subito.it' + link) : request.url });
+        }
+      });
+      return items;
+    }`,
+    maxRequestsPerCrawl: 1,
+  }, keys.apify||"");
+  var dsId  = await apifyWait(runId, keys.apify||"");
+  var items = await apifyItems(dsId, keys.apify||"", 20);
+  var flat = [];
+  items.forEach(function(item) {
+    if (Array.isArray(item)) flat = flat.concat(item);
+    else if (item.title || item.price) flat.push(item);
+  });
+  return flat.filter(function(i){return i.title||i.price;}).map(function(item) {
+    var ct = extractContacts((item.phone||"")+" "+(item.description||""));
+    return {
+      platform: "subito",
+      name:     item.title||"Annuncio Subito",
+      type:     "Affitto vacanze",
+      price:    item.price||"",
+      phone:    item.phone||ct.phone||null,
+      email:    ct.email, whatsapp: ct.whatsapp,
+      is_private: true, owner_managed: true, no_agency: true,
+      src: item.url||searchUrl,
+    };
+  });
 }
 
-async function searchIdealista(dest, keys) {
-  // Usa Serper per trovare annunci reali con link diretti — bypassa bot detection
+async function searchIdealista(dest, req) {
+  var slug = normKey(dest).replace(/_/g,"-");
   var country = detectCountry(dest);
-  var siteQuery = country === "es"
-    ? "site:idealista.com/inmueble affitto alquiler " + dest
-    : "site:idealista.it/annunci affitto " + dest + " appartamento villa";
-  var baseHost = country === "es" ? "idealista.com" : "idealista.it";
-  try {
-    var res = await fetch("/api/serper", {
-      method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({ query: siteQuery, serperKey: (keys&&keys.serper)||"", type: "search" })
-    });
-    if (!res.ok) throw new Error("Serper "+res.status);
-    var data = await res.json();
-    var destLower = dest.toLowerCase();
-    return (data.organic||[]).filter(function(r) {
-      return r.link && r.link.includes(baseHost) && !r.link.includes("/notizie/");
-    }).map(function(r) {
-      var ct = extractContacts((r.snippet||"")+" "+(r.title||""));
-      var priceM = (r.snippet||"").match(/(\d[\d.,]+)\s*€/);
-      var name = (r.title||"Annuncio Idealista").replace(/idealista\s*[›>|·-]\s*/gi,"").trim();
-      var isPrivate = !/agenzia|agency|inmobiliaria/i.test(r.snippet||"");
-      return {
-        platform:  "idealista",
-        name:      name||"Annuncio Idealista",
-        type:      "Appartamento / Villa",
-        location:  dest,
-        price:     priceM ? priceM[1]+"€/mese" : "",
-        email:     ct.email,
-        whatsapp:  ct.whatsapp,
-        phone:     ct.phone,
-        is_private:    isPrivate,
-        owner_managed: isPrivate,
-        no_agency:     isPrivate,
-        src:       r.link,
-      };
-    });
-  } catch(e) { return []; }
+  var results = [];
+
+  if (country === "es") {
+    var habitUrl = "https://www.habitaclia.com/alquiler-en-" + slug + ".htm";
+    results = await fetchScrape(habitUrl, "habitaclia").catch(function(){return [];});
+    if (!results.length) {
+      var fcUrl = "https://api.fotocasa.es/PropertySearchService/api/v2/properties?" +
+        "culture=es-ES&isMap=false&isNewConstructionPromotions=false" +
+        "&maxItems=20&order=score&pageIndex=1&propertyTypeId=2&transactionTypeId=2" +
+        "&text=" + encodeURIComponent(dest);
+      results = await fetchScrape(fcUrl, "fotocasa_api").catch(function(){return [];});
+    }
+  } else {
+    var url = "https://www.immobiliare.it/affitto-case/" + slug + "/?localiMinimo=1";
+    results = await fetchScrape(url, "immobiliare").catch(function(){return [];});
+  }
+  return results;
 }
 
 async function searchImmobiliare(dest, keys) {
   var country = detectCountry(dest);
-  // Per Italia: Serper su immobiliare.it — link diretti agli annunci
-  if (country === "it") {
+  if (country === "it" || country === "id") {
     try {
-      var res = await fetch("/api/serper", {
-        method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({
-          query: "site:immobiliare.it/annunci affitto " + dest + " appartamento villa casa",
-          serperKey: (keys&&keys.serper)||"", type: "search"
-        })
-      });
-      if (!res.ok) throw new Error("Serper "+res.status);
-      var data = await res.json();
-      return (data.organic||[]).filter(function(r) {
-        return r.link && r.link.includes("immobiliare.it") && r.link.includes("/annunci/");
-      }).map(function(r) {
-        var ct = extractContacts((r.snippet||"")+" "+(r.title||""));
-        var priceM = (r.snippet||"").match(/(\d[\d.,]+)\s*€/);
-        var name = (r.title||"Annuncio Immobiliare").replace(/immobiliare\.it\s*[›>|·-]\s*/gi,"").trim();
-        var isPrivate = !/agenzia|agency/i.test(r.snippet||"");
+      var runId = await apifyRun("igolaizola~immobiliare-it-scraper", {
+        startUrls: [{
+          url: "https://www.immobiliare.it/affitto-case/" +
+            normKey(dest).replace(/_/g,"-") + "/?localiMinimo=1"
+        }],
+        maxItems: 20,
+      }, keys.apify||"");
+      var dsId  = await apifyWait(runId, keys.apify||"");
+      var items = await apifyItems(dsId, keys.apify||"", 20);
+      return items.filter(function(i){return i.title||i.address;}).map(function(item) {
+        var isPrivate = !item.agency && item.advertiserType !== "agency";
+        var ct = extractContacts((item.description||"")+" "+(item.phone||"")+" "+(item.email||""));
         return {
           platform:  "immobiliare",
-          name:      name||"Annuncio Immobiliare.it",
-          type:      "Appartamento / Villa",
-          location:  dest,
-          price:     priceM ? priceM[1]+"€/mese" : "",
-          email:     ct.email, whatsapp: ct.whatsapp, phone: ct.phone,
-          is_private: isPrivate, owner_managed: isPrivate, no_agency: isPrivate,
-          src: r.link,
+          name:      item.title||item.address||"Annuncio Immobiliare",
+          type:      item.propertyType||item.category||"Appartamento",
+          location:  item.city||item.address||dest,
+          price:     item.price ? item.price+"€/mese" : "",
+          phone:     item.phone||item.phones&&item.phones[0]||ct.phone||null,
+          email:     item.email||ct.email||null,
+          is_private:    isPrivate,
+          owner_managed: isPrivate,
+          no_agency:     isPrivate,
+          src: item.url||"https://www.immobiliare.it",
         };
       });
-    } catch(e) { return []; }
+    } catch(e) {
+      var slug = normKey(dest).replace(/_/g,"-");
+      return fetchScrape("https://www.immobiliare.it/affitto-case/"+slug+"/", "immobiliare").catch(function(){return [];});
+    }
   } else {
-    // Per Spagna/Grecia: Fotocasa o Habitaclia via Serper
-    var site = country === "es" ? "fotocasa.es" : "spitogatos.gr";
-    try {
-      var res2 = await fetch("/api/serper", {
-        method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({
-          query: "site:"+site+" alquiler rent " + dest + " villa apartamento",
-          serperKey: (keys&&keys.serper)||"", type: "search"
-        })
-      });
-      if (!res2.ok) throw new Error("Serper "+res2.status);
-      var data2 = await res2.json();
-      return (data2.organic||[]).filter(function(r){return r.link&&r.link.includes(site);}).map(function(r) {
-        var priceM2 = (r.snippet||"").match(/(\d[\d.,]+)\s*€/);
-        var name2 = (r.title||"Annuncio").replace(/fotocasa|spitogatos/gi,"").trim();
-        return {
-          platform:  "idealista",
-          name:      name2||"Annuncio",
-          type:      "Appartamento / Villa",
-          location:  dest,
-          price:     priceM2 ? priceM2[1]+"€" : "",
-          is_private: false,
-          src: r.link,
-        };
-      });
-    } catch(e) { return []; }
+    var slug2 = normKey(dest).replace(/_/g,"-");
+    return fetchScrape("https://www.habitaclia.com/alquiler-en-"+slug2+".htm", "habitaclia").catch(function(){return [];});
   }
 }
-
 
 // ─── RUN SEARCH ───────────────────────────────────────────────────────────────
 async function runSearch(dest, mode, req, keys, onLog) {
@@ -918,34 +894,31 @@ async function runSearch(dest, mode, req, keys, onLog) {
 
   var tasks = [];
 
-  // Google Maps (Serper) — richiede serper key o env var
-  // Serper: run if key in app settings OR if SERPER_API_KEY env var is set on Vercel
   if (IS_VERCEL || keys.serper) {
     tasks.push(wrap("Google Maps", function(){return searchGoogleMaps(dest,mode,req,keys);}));
+    tasks.push(wrap("Gruppi Facebook", function(){return searchFacebookGroups(dest,keys);}));
+    tasks.push(wrap("Telegram Annunci", function(){return searchTelegramSerper(dest,keys);}));
   }
 
-  // Direct scraping — sempre attivo su Vercel
   if (IS_VERCEL) {
     tasks.push(wrap("MediaVacanze", function(){return searchMediaVacanze(dest,req);}));
     tasks.push(wrap("Idealista",    function(){return searchIdealista(dest,req);}));
     tasks.push(wrap("Telegram",     function(){return searchTelegramPublic(dest);}));
   }
 
-  // Apify actors — usano APIFY_TOKEN da env var come fallback
   if (IS_VERCEL) {
     tasks.push(wrap("Instagram",    function(){return searchInstagram(dest,keys);}));
     tasks.push(wrap("Facebook",     function(){return searchFacebook(dest,keys);}));
     tasks.push(wrap("Immobiliare",  function(){return searchImmobiliare(dest,keys);}));
     tasks.push(wrap("Subito.it",    function(){return searchSubito(dest,keys);}));
     tasks.push(wrap("VRBO",         function(){return searchVRBO(dest,keys);}));
-
+    tasks.push(wrap("Airbnb",       function(){return searchAirbnbApify(dest,keys);}));
   }
 
   if (!tasks.length) throw new Error("Nessun canale disponibile. Configura le API key.");
 
   await Promise.allSettled(tasks);
 
-  // Sort: by score desc, req-matches first
   all.sort(function(a,b) {
     if (req && a.matchReasons.length !== b.matchReasons.length) {
       return b.matchReasons.length - a.matchReasons.length;
@@ -953,10 +926,8 @@ async function runSearch(dest, mode, req, keys, onLog) {
     return b.score - a.score;
   });
 
-  // ── AGENT v4: Enrich leads missing contacts ──────────────────────────────
   var enriched = await runEnrichment(all, keys, onLog);
 
-  // Re-score after enrichment (new contacts may change score)
   enriched = enriched.map(function(s) {
     if (!s.enriched) return s;
     var sc = computeScore(s, req);
@@ -975,12 +946,12 @@ async function runSearch(dest, mode, req, keys, onLog) {
 
 function ScoreRing(props) {
   var s = props.score||0;
-  var c = s>=70?"#34D399":s>=45?"#FBBF24":"#9CA3AF";
+  var c = s>=70?"#34D399":s>=45?"#FBBF24":"#6B7280";
   var dash = Math.round(125.6*s/100);
   return (
     <div style={{position:"relative",width:46,height:46,flexShrink:0}}>
       <svg width="46" height="46" style={{transform:"rotate(-90deg)"}}>
-        <circle cx="23" cy="23" r="19" fill="none" stroke="rgba(255,255,255,0.07)" strokeWidth="5"/>
+        <circle cx="23" cy="23" r="19" fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth="5"/>
         <circle cx="23" cy="23" r="19" fill="none" stroke={c} strokeWidth="5"
           strokeDasharray={dash+" "+(119.4-dash)} strokeLinecap="round"/>
       </svg>
@@ -993,11 +964,11 @@ function ScoreRing(props) {
 
 function Chip(props) {
   if (!props.label) return null;
-  var c = props.c||"#EC4899";
+  var c = props.c||"#6366F1";
   return (
     <a href={props.href} target="_blank" rel="noopener noreferrer"
       style={{display:"inline-flex",alignItems:"center",gap:3,padding:"4px 10px",borderRadius:20,
-        background:c+"15",border:"1px solid "+c+"30",color:c,fontSize:11,fontWeight:600,
+        background:c+"18",border:"1px solid "+c+"35",color:c,fontSize:11,fontWeight:600,
         textDecoration:"none",marginRight:4,marginBottom:4}}>
       {props.icon} {props.label}
     </a>
@@ -1010,18 +981,19 @@ function FilterBadges(props) {
   var roomLabel = req.roomType==="intera"?"Appartamento intero":req.roomType==="condivisa"?"Stanza condivisa":req.roomType==="stanza"?"Stanza privata":null;
   var durationLabel = req.durationType==="annuale"?"Annuale":req.durationType==="stagionale"?"Stagionale":req.durationType==="breve"?"Breve periodo":null;
   var badges = [
-    req.destination && { bg:"rgba(236,72,153,0.15)", c:"#F472B6", label:"📍 "+req.destination },
+    req.destination && { bg:"rgba(99,102,241,0.15)", c:"#A5B4FC", label:"📍 "+req.destination },
     roomLabel        && { bg:"rgba(96,165,250,0.15)", c:"#60A5FA", label:"🏠 "+roomLabel },
     req.people       && { bg:"rgba(52,211,153,0.15)", c:"#34D399", label:"👥 "+req.people+" persone" },
     req.budgetMax    && { bg:"rgba(251,191,36,0.15)", c:"#FBBF24", label:"💶 max "+req.budgetMax+"€/"+(req.budgetPeriod||"mese") },
     durationLabel    && { bg:"rgba(139,92,246,0.15)", c:"#A78BFA", label:"📅 "+durationLabel },
+    req.licenza      && { bg:"rgba(245,158,11,0.15)", c:"#F59E0B", label:"📋 Con licenza" },
     (req.dateFrom||req.dateTo) && { bg:"rgba(139,92,246,0.15)", c:"#A78BFA", label:(req.dateFrom||"")+(req.dateTo?" → "+req.dateTo:"") },
   ].filter(Boolean);
   if (!badges.length) return null;
   return (
-    <div style={{padding:"8px 12px",background:"rgba(236,72,153,0.06)",borderRadius:10,
-      border:"1px solid rgba(236,72,153,0.18)",marginTop:6}}>
-      <div style={{fontSize:9,color:"#EC4899",fontWeight:700,textTransform:"uppercase",
+    <div style={{padding:"8px 12px",background:"rgba(99,102,241,0.06)",borderRadius:10,
+      border:"1px solid rgba(99,102,241,0.18)",marginTop:6}}>
+      <div style={{fontSize:9,color:"#818CF8",fontWeight:700,textTransform:"uppercase",
         letterSpacing:"0.1em",marginBottom:6}}>Filtri estratti</div>
       <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
         {badges.map(function(b,i){
@@ -1035,130 +1007,116 @@ function FilterBadges(props) {
 
 function LeadCard(props) {
   var s = props.lead;
-  var [open,      setOpen]      = useState(false);
-  var [msgs,      setMsgs]      = useState(null);
-  var [loadMsg,   setLoadMsg]   = useState(false);
-  var [msgLang,   setMsgLang]   = useState("it");
-  var [status,    setStatus]    = useState(s.status||"new");
-
+  var [open, setOpen] = useState(false);
+  var [msgs, setMsgs] = useState(null);
+  var [loadMsg, setLoadMsg] = useState(false);
+  var [status, setStatus] = useState(s.status||"new");
   var sc = s.score||0;
-  var c  = sc>=70?"#34D399":sc>=45?"#FBBF24":"#9CA3AF";
+  var c  = sc>=70?"#34D399":sc>=45?"#FBBF24":"#6B7280";
   var pm = PLATFORMS[s.platform]||{label:s.platform,color:"#6B7280"};
 
-  var STATUS_COLORS  = {new:"#6B7280",contacted:"#FBBF24",replied:"#60A5FA",qualified:"#34D399",active:"#EC4899",archived:"#374151"};
-  var STATUS_LABELS  = {new:"Nuovo",contacted:"Contattato",replied:"Risposto",qualified:"Qualificato",active:"Attivo",archived:"Archiviato"};
-  var stColor = STATUS_COLORS[status]||"#6B7280";
-
-  var currentMsg = msgs ? (msgs[msgLang]||msgs) : {};
-  var langColor  = msgLang==="it"?"#34D399":msgLang==="en"?"#60A5FA":"#F472B6";
-
-  function copy(t) { navigator.clipboard.writeText(t||"").catch(function(){}); }
+  var STATUS_COLORS = {
+    new:"#6B7280", contacted:"#FBBF24", replied:"#60A5FA",
+    qualified:"#34D399", active:"#6366F1", archived:"#374151"
+  };
+  var STATUS_LABELS = {
+    new:"Nuovo", contacted:"Contattato", replied:"Risposto",
+    qualified:"Qualificato", active:"Attivo", archived:"Archiviato"
+  };
 
   async function genMsg() {
     if (msgs) return;
     setLoadMsg(true);
     try {
-      var sysPrompt = "Tourism partnership consultant. Propose 12% commission collaboration (zero fixed costs). Generate in ALL 3 languages. Reply ONLY valid JSON: " +
-        '{"it":{"whatsapp":"msg IT 3 lines","email_subject":"oggetto","email_body":"corpo 5 righe"},' +
-        '"en":{"whatsapp":"msg EN 3 lines","email_subject":"subject","email_body":"body 5 lines"},' +
-        '"es":{"whatsapp":"msg ES 3 lineas","email_subject":"asunto","email_body":"cuerpo 5 lineas"}}';
-      var userPrompt = "Structure: " + s.name + "\nType: " + s.type + "\nLocation: " + s.location;
-      var raw = await callClaude(userPrompt, sysPrompt);
+      var sys = "Sei un esperto di real estate. Genera messaggi professionali e diretti per proporre una collaborazione a commissione al proprietario di un immobile (12% commissione, zero costi fissi, tu gestisci prenotazioni e marketing). Tono rispettoso, non commerciale. Rispondi SOLO JSON: {\"whatsapp\":\"msg max 3 righe\",\"email_subject\":\"oggetto\",\"email_body\":\"corpo max 5 righe\"}";
+      var prompt = "Struttura: "+s.name+"\nTipo: "+s.type+"\nLocation: "+s.location+(s.licenza?" (con licenza)":"");
+      var raw = await callClaude(prompt, sys);
       var parsed = parseJSON(raw);
-      if (parsed && parsed.it) {
-        setMsgs(parsed);
-      } else if (parsed && parsed.whatsapp) {
-        setMsgs({it:parsed, en:{whatsapp:"",email_subject:"",email_body:""}, es:{whatsapp:"",email_subject:"",email_body:""}});
-      } else {
-        setMsgs({it:{whatsapp:raw.slice(0,200),email_subject:"Collaborazione LuXy Club",email_body:raw}, en:{whatsapp:"",email_subject:"",email_body:""}, es:{whatsapp:"",email_subject:"",email_body:""}});
-      }
+      setMsgs(parsed || { whatsapp:raw.slice(0,200), email_subject:"Proposta collaborazione – Property Scout", email_body:raw });
     } catch(e) { alert("Errore: "+e.message); }
     setLoadMsg(false);
   }
 
-  return (
-    <div style={{background:"rgba(255,255,255,0.03)",border:"1px solid "+c+"25",
-      borderRadius:12,marginBottom:8,overflow:"hidden",animation:"fadeUp 0.2s ease"}}>
+  function copy(t) { navigator.clipboard.writeText(t).catch(function(){}); }
 
-      {/* HEADER */}
+  var stColor = STATUS_COLORS[status]||"#6B7280";
+
+  return (
+    <div className="ps-lead-card" style={{background:"rgba(255,255,255,0.025)",border:"1px solid "+c+"22",
+      borderRadius:14,marginBottom:8,overflow:"hidden",animation:"fadeUp 0.2s ease",
+      transition:"transform 0.15s ease, box-shadow 0.15s ease"}}>
+
       <div style={{padding:"12px 14px",display:"flex",gap:10,alignItems:"flex-start",
         cursor:"pointer"}} onClick={function(){setOpen(function(o){return !o;});}}>
         <ScoreRing score={sc}/>
         <div style={{flex:1,minWidth:0}}>
           <div style={{display:"flex",alignItems:"center",gap:5,marginBottom:3,flexWrap:"wrap"}}>
             <span style={{fontSize:10,padding:"2px 8px",borderRadius:20,fontWeight:700,
-              background:pm.color+"20",border:"1px solid "+pm.color+"40",color:pm.color}}>{pm.label}</span>
+              background:pm.color+"1A",border:"1px solid "+pm.color+"40",color:pm.color}}>{pm.label}</span>
             {s.type&&<span style={{fontSize:10,color:"#6B7280"}}>{s.type}</span>}
             {s.is_private&&<span style={{fontSize:10,padding:"2px 6px",borderRadius:20,
               background:"rgba(52,211,153,0.1)",border:"1px solid rgba(52,211,153,0.25)",color:"#34D399"}}>privato</span>}
+            {s.licenza&&<span style={{fontSize:10,padding:"2px 6px",borderRadius:20,
+              background:"rgba(245,158,11,0.12)",border:"1px solid rgba(245,158,11,0.3)",color:"#F59E0B"}}>📋 licenza</span>}
             {s.enriched&&<span style={{fontSize:10,padding:"2px 6px",borderRadius:20,
-              background:"rgba(139,92,246,0.1)",border:"1px solid rgba(139,92,246,0.3)",color:"#A78BFA"}}>✦ arricchito</span>}
+              background:"rgba(99,102,241,0.1)",border:"1px solid rgba(99,102,241,0.3)",color:"#A5B4FC"}}>✦ arricchito</span>}
             {s.priority==="HIGH"&&<span style={{fontSize:10,padding:"2px 6px",borderRadius:20,
               background:"rgba(52,211,153,0.15)",color:"#34D399",fontWeight:700}}>HIGH</span>}
           </div>
-          <div className="lx-card-name" style={{fontSize:15,fontWeight:700,color:"#F9FAFB",marginBottom:2,
+          <div className="lx-card-name" style={{fontSize:15,fontWeight:700,color:"#F1F5F9",marginBottom:3,
             overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{s.name}</div>
-          <div style={{fontSize:10,color:"#6B7280",display:"flex",gap:8,flexWrap:"wrap"}}>
-            {s.location&&<span>{"📍 "+s.location}</span>}
-            {s.price&&<span>{"💶 "+s.price}</span>}
-            {s.rating&&<span>{"⭐ "+s.rating+(s.reviews?" ("+s.reviews+")":"")}</span>}
+          <div style={{fontSize:10,color:"#64748B",display:"flex",gap:8,flexWrap:"wrap"}}>
+            {s.location&&<span>📍 {s.location}</span>}
+            {s.price&&<span>💶 {s.price}</span>}
+            {s.rating&&<span>⭐ {s.rating}{s.reviews?" ("+s.reviews+")":""}</span>}
           </div>
-          {s.scoreReason&&<div style={{fontSize:10,color:c,marginTop:3}}>{"✓ "+s.scoreReason}</div>}
+          {s.scoreReason&&<div style={{fontSize:10,color:c,marginTop:3}}>✓ {s.scoreReason}</div>}
           {s.matchReasons&&s.matchReasons.length>0&&(
             <div style={{display:"flex",gap:4,flexWrap:"wrap",marginTop:4}}>
               {s.matchReasons.map(function(r,i){
                 return <span key={i} style={{fontSize:10,padding:"2px 7px",borderRadius:20,
-                  background:"rgba(16,185,129,0.12)",border:"1px solid rgba(16,185,129,0.28)",
-                  color:"#34D399"}}>{"✓ "+r}</span>;
+                  background:"rgba(16,185,129,0.1)",border:"1px solid rgba(16,185,129,0.25)",
+                  color:"#34D399"}}>✓ {r}</span>;
               })}
             </div>
           )}
         </div>
-        <span style={{color:"#4B5563",fontSize:12,flexShrink:0}}>{open?"▲":"▼"}</span>
+        <span style={{color:"#475569",fontSize:12,flexShrink:0}}>{open?"▲":"▼"}</span>
       </div>
 
-      {/* EXPANDED */}
       {open&&(
-        <div style={{borderTop:"1px solid rgba(255,255,255,0.06)",padding:"12px 14px",background:"rgba(0,0,0,0.18)"}}>
+        <div style={{borderTop:"1px solid rgba(255,255,255,0.05)",
+          padding:"12px 14px",background:"rgba(0,0,0,0.15)"}}>
 
-          {/* Contacts */}
           <div style={{marginBottom:10}}>
-            {s.whatsapp&&(
-              <Chip icon="💬" label={s.whatsapp}
-                href={"https://wa.me/"+s.whatsapp.replace(/[^0-9+]/g,"")} c="#34D399"/>
-            )}
+            {s.whatsapp&&<Chip icon="💬" label={s.whatsapp}
+              href={"https://wa.me/"+s.whatsapp.replace(/[^0-9+]/g,"")} c="#25D366"/>}
             {s.phone&&(
               <span>
-                <Chip icon="📞" label={s.phone} href={"tel:"+s.phone} c="#FBBF24"/>
+                <Chip icon="📞" label={s.phone}
+                  href={"tel:"+s.phone} c="#FBBF24"/>
                 <Chip icon="💬 WA" label="Apri WA"
                   href={"https://wa.me/"+s.phone.replace(/[^0-9+]/g,"")} c="#25D366"/>
               </span>
             )}
-            {s.email&&<Chip icon="✉" label={s.email} href={"mailto:"+s.email} c="#60A5FA"/>}
+            {s.email&&<Chip icon="✉" label={s.email}
+              href={"mailto:"+s.email} c="#60A5FA"/>}
             {s.instagram&&<Chip icon="📸" label={s.instagram}
               href={"https://instagram.com/"+s.instagram.replace("@","")} c="#E1306C"/>}
             {s.telegram_channel&&<Chip icon="✈" label={"@"+s.telegram_channel}
               href={s.channel_url||("https://t.me/"+s.telegram_channel)} c="#26A5E4"/>}
-            {s.website&&<Chip icon="🔗"
-              label={s.website.replace(/^https?:\/\//,"").split("/")[0]}
+            {s.website&&<Chip icon="🔗" label={s.website.replace(/^https?:\/\//,"").split("/")[0]}
               href={s.website} c="#C084FC"/>}
-            {s.src&&<Chip icon="📋"
-              label={s.platform==="telegram"?"Vai al post":"Scheda"}
-              href={s.src} c="#6B7280"/>}
+            {s.src&&<Chip icon="📋" label={s.platform==="telegram"?"Vai al post":"Scheda"}
+              href={s.src} c="#64748B"/>}
           </div>
 
-          {/* Bio */}
-          {s.bio&&(
-            <div style={{fontSize:11,color:"#9CA3AF",fontStyle:"italic",marginBottom:10,
-              padding:"6px 8px",background:"rgba(255,255,255,0.02)",borderRadius:6,lineHeight:1.6}}>
-              {s.bio}
-            </div>
-          )}
+          {s.bio&&<div style={{fontSize:11,color:"#94A3B8",fontStyle:"italic",
+            marginBottom:10,padding:"6px 10px",background:"rgba(255,255,255,0.02)",
+            borderRadius:8,lineHeight:1.6,borderLeft:"2px solid rgba(99,102,241,0.3)"}}>{s.bio}</div>}
 
-          {/* Actions */}
-          <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center",marginBottom:10}}>
-            <select value={status}
-              onChange={function(e){setStatus(e.target.value);props.onStatus(s.id,e.target.value);}}
+          <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+            <select value={status} onChange={function(e){setStatus(e.target.value);props.onStatus(s.id,e.target.value);}}
               onClick={function(e){e.stopPropagation();}}
               style={{fontSize:11,padding:"5px 9px",borderRadius:8,
                 background:stColor+"18",border:"1px solid "+stColor+"40",
@@ -1167,114 +1125,80 @@ function LeadCard(props) {
                 return <option key={k} value={k}>{STATUS_LABELS[k]}</option>;
               })}
             </select>
-            <button onClick={function(e){
-                e.stopPropagation();
-                var t = s.whatsapp?"https://wa.me/"+s.whatsapp.replace(/[^0-9+]/g,""):s.email||s.phone||"";
-                copy(t);
-              }}
-              style={{fontSize:11,padding:"5px 10px",borderRadius:8,
-                border:"1px solid rgba(255,255,255,0.1)",
-                background:"rgba(255,255,255,0.04)",color:"#9CA3AF",cursor:"pointer"}}>
-              {"📋 Copia"}
+            <button onClick={function(e){e.stopPropagation();var t=(s.whatsapp?"https://wa.me/"+s.whatsapp.replace(/[^0-9+]/g,""):s.email||s.phone||"");navigator.clipboard.writeText(t).catch(function(){});}}
+              style={{fontSize:11,padding:"5px 10px",borderRadius:8,border:"1px solid rgba(255,255,255,0.1)",
+                background:"rgba(255,255,255,0.04)",color:"#94A3B8",cursor:"pointer"}}>
+              📋 Copia
             </button>
             <button onClick={function(e){e.stopPropagation();genMsg();}}
-              style={{fontSize:11,padding:"5px 10px",borderRadius:8,
-                border:"1px solid rgba(236,72,153,0.3)",
-                background:"rgba(236,72,153,0.08)",color:"#F472B6",cursor:"pointer"}}>
+              style={{fontSize:11,padding:"5px 12px",borderRadius:8,
+                border:"1px solid rgba(99,102,241,0.35)",
+                background:"rgba(99,102,241,0.1)",color:"#A5B4FC",cursor:"pointer",fontWeight:600}}>
               {loadMsg?"⏳...":"✉ Genera messaggio"}
             </button>
           </div>
 
-          {/* Score details */}
           {s.scoreReason&&(
-            <div style={{marginBottom:10,padding:"7px 10px",background:"rgba(255,255,255,0.02)",
-              borderRadius:8,border:"1px solid rgba(255,255,255,0.06)"}}>
-              <div style={{fontSize:9,color:"#4B5563",textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:4}}>
-                {"Score "+s.score}
-              </div>
-              <div style={{fontSize:11,color:"#6B7280",lineHeight:1.7}}>{s.scoreReason}</div>
-              {s.scoreFlags&&s.scoreFlags.map&&s.scoreFlags.map(function(f,i){
-                return <div key={i} style={{fontSize:10,color:"#F87171"}}>{"⚠ "+f}</div>;
-              })}
+            <div style={{marginTop:10,padding:"8px 10px",background:"rgba(255,255,255,0.02)",
+              borderRadius:8,border:"1px solid rgba(255,255,255,0.05)"}}>
+              <div style={{fontSize:9,color:"#475569",textTransform:"uppercase",
+                letterSpacing:"0.08em",marginBottom:4}}>Score {s.score} — Motivazioni</div>
+              <div style={{fontSize:11,color:"#64748B",lineHeight:1.7}}>{s.scoreReason}</div>
+              {s.scoreFlags&&s.scoreFlags.length>0&&(
+                <div style={{marginTop:4}}>
+                  {s.scoreFlags.map(function(f,i){
+                    return <div key={i} style={{fontSize:10,color:"#F87171"}}>⚠ {f}</div>;
+                  })}
+                </div>
+              )}
+              {s.penalties&&s.penalties.length>0&&(
+                <div style={{marginTop:4}}>
+                  {s.penalties.map(function(p,i){
+                    return <div key={i} style={{fontSize:10,color:"#F87171"}}>⚠ {p}</div>;
+                  })}
+                </div>
+              )}
             </div>
           )}
 
-          {/* Messages — 3 lingue */}
           {msgs&&(
-            <div style={{marginTop:6}}>
-              {/* Lang tabs */}
-              <div style={{display:"flex",gap:5,marginBottom:8}}>
-                {["it","en","es"].map(function(lang){
-                  var labels = {it:"🇮🇹 IT",en:"🇬🇧 EN",es:"🇪🇸 ES"};
-                  var colors = {it:"#34D399",en:"#60A5FA",es:"#F472B6"};
-                  var active = msgLang===lang;
-                  return (
-                    <button key={lang}
-                      onClick={function(){setMsgLang(lang);}}
-                      style={{fontSize:10,padding:"3px 10px",borderRadius:20,cursor:"pointer",
-                        fontWeight:active?700:400,
-                        background:active?colors[lang]+"20":"transparent",
-                        border:"1px solid "+(active?colors[lang]+"60":"rgba(255,255,255,0.1)"),
-                        color:active?colors[lang]:"#6B7280"}}>
-                      {labels[lang]}
-                    </button>
-                  );
-                })}
+            <div className="lx-msg-grid" style={{marginTop:10,display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+              <div style={{padding:10,background:"rgba(37,211,102,0.05)",
+                border:"1px solid rgba(37,211,102,0.18)",borderRadius:10}}>
+                <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
+                  <span style={{fontSize:10,fontWeight:700,color:"#25D366",textTransform:"uppercase"}}>💬 WhatsApp</span>
+                  <button onClick={function(){copy(msgs.whatsapp);}}
+                    style={{fontSize:10,padding:"2px 7px",borderRadius:5,border:"1px solid rgba(37,211,102,0.3)",
+                      background:"transparent",color:"#25D366",cursor:"pointer"}}>Copia</button>
+                </div>
+                <div style={{fontSize:12,color:"#CBD5E1",lineHeight:1.7,whiteSpace:"pre-wrap"}}>{msgs.whatsapp}</div>
+                {s.whatsapp&&<a href={"https://wa.me/"+s.whatsapp.replace(/[^0-9+]/g,"")+"?text="+encodeURIComponent(msgs.whatsapp)}
+                  target="_blank" rel="noopener noreferrer"
+                  style={{display:"inline-block",marginTop:7,fontSize:11,padding:"4px 10px",borderRadius:7,
+                    background:"rgba(37,211,102,0.15)",color:"#25D366",textDecoration:"none",fontWeight:700}}>
+                  Invia su WA →
+                </a>}
               </div>
-              {/* WA + Email for selected lang */}
-              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
-                <div style={{padding:8,background:langColor+"10",
-                  border:"1px solid "+langColor+"28",borderRadius:8}}>
-                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}>
-                    <span style={{fontSize:9,fontWeight:700,color:langColor}}>{"💬 WhatsApp"}</span>
-                    <button onClick={function(){copy(currentMsg.whatsapp);}}
-                      style={{fontSize:9,padding:"1px 6px",borderRadius:4,
-                        border:"1px solid "+langColor+"40",background:"transparent",
-                        color:langColor,cursor:"pointer"}}>Copia</button>
-                  </div>
-                  <div style={{fontSize:11,color:"#D1D5DB",lineHeight:1.6,whiteSpace:"pre-wrap"}}>
-                    {currentMsg.whatsapp}
-                  </div>
-                  {s.whatsapp&&currentMsg.whatsapp&&(
-                    <a href={"https://wa.me/"+s.whatsapp.replace(/[^0-9+]/g,"")+"?text="+encodeURIComponent(currentMsg.whatsapp||"")}
-                      target="_blank" rel="noopener noreferrer"
-                      style={{display:"inline-block",marginTop:6,fontSize:10,padding:"3px 8px",
-                        borderRadius:6,background:langColor+"22",color:langColor,
-                        textDecoration:"none",fontWeight:700}}>
-                      {"Invia WA →"}
-                    </a>
-                  )}
+              <div style={{padding:10,background:"rgba(96,165,250,0.05)",
+                border:"1px solid rgba(96,165,250,0.18)",borderRadius:10}}>
+                <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
+                  <span style={{fontSize:10,fontWeight:700,color:"#60A5FA",textTransform:"uppercase"}}>✉ Email</span>
+                  <button onClick={function(){copy(msgs.email_subject+"\n\n"+msgs.email_body);}}
+                    style={{fontSize:10,padding:"2px 7px",borderRadius:5,border:"1px solid rgba(96,165,250,0.3)",
+                      background:"transparent",color:"#60A5FA",cursor:"pointer"}}>Copia</button>
                 </div>
-                <div style={{padding:8,background:"rgba(255,255,255,0.02)",
-                  border:"1px solid rgba(255,255,255,0.08)",borderRadius:8}}>
-                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}>
-                    <span style={{fontSize:9,fontWeight:700,color:"#9CA3AF"}}>{"✉ Email"}</span>
-                    <button onClick={function(){copy((currentMsg.email_subject||"")+"\n\n"+(currentMsg.email_body||""));}}
-                      style={{fontSize:9,padding:"1px 6px",borderRadius:4,
-                        border:"1px solid rgba(255,255,255,0.15)",background:"transparent",
-                        color:"#9CA3AF",cursor:"pointer"}}>Copia</button>
-                  </div>
-                  {currentMsg.email_subject&&(
-                    <div style={{fontSize:10,fontWeight:700,color:"#9CA3AF",marginBottom:4}}>
-                      {"Ogg: "+currentMsg.email_subject}
-                    </div>
-                  )}
-                  <div style={{fontSize:11,color:"#D1D5DB",lineHeight:1.6,whiteSpace:"pre-wrap"}}>
-                    {currentMsg.email_body}
-                  </div>
-                  {s.email&&currentMsg.email_body&&(
-                    <a href={"mailto:"+s.email+"?subject="+encodeURIComponent(currentMsg.email_subject||"")+"&body="+encodeURIComponent(currentMsg.email_body||"")}
-                      style={{display:"inline-block",marginTop:6,fontSize:10,padding:"3px 8px",
-                        borderRadius:6,background:"rgba(255,255,255,0.08)",
-                        color:"#9CA3AF",textDecoration:"none",fontWeight:700}}>
-                      {"Apri Email →"}
-                    </a>
-                  )}
+                <div style={{fontSize:11,fontWeight:700,color:"#60A5FA",marginBottom:5}}>
+                  Oggetto: {msgs.email_subject}
                 </div>
+                <div style={{fontSize:12,color:"#CBD5E1",lineHeight:1.7,whiteSpace:"pre-wrap"}}>{msgs.email_body}</div>
+                {s.email&&<a href={"mailto:"+s.email+"?subject="+encodeURIComponent(msgs.email_subject)+"&body="+encodeURIComponent(msgs.email_body)}
+                  style={{display:"inline-block",marginTop:7,fontSize:11,padding:"4px 10px",borderRadius:7,
+                    background:"rgba(96,165,250,0.15)",color:"#60A5FA",textDecoration:"none",fontWeight:700}}>
+                  Apri Email →
+                </a>}
               </div>
             </div>
           )}
-
         </div>
       )}
     </div>
@@ -1313,14 +1237,15 @@ function ResultsView(props) {
   var high  = leads.filter(function(l){return l.priority==="HIGH";}).length;
   var hasWA = leads.filter(function(l){return l.whatsapp;}).length;
   var hasEM = leads.filter(function(l){return l.email;}).length;
+  var hasLic = leads.filter(function(l){return l.licenza;}).length;
 
   function handleExcel() {
     var wb = XLSX.utils.book_new();
-    var h = ["Score","Priority","Nome","Tipo","Location","WhatsApp","Tel","Email","Sito","Prezzo","Rating","Recensioni","Score Motivazioni","Status","Piattaforma","Link"];
+    var h = ["Score","Priority","Nome","Tipo","Location","WhatsApp","Tel","Email","Sito","Prezzo","Rating","Recensioni","Licenza","Score Motivazioni","Status","Piattaforma","Link"];
     var rows = leads.map(function(l) {
       return [l.score+"%",l.priority,l.name,l.type,l.location,
         l.whatsapp||"",l.phone||"",l.email||"",l.website||"",
-        l.price||"",l.rating||"",l.reviews||"",l.scoreReason||"",
+        l.price||"",l.rating||"",l.reviews||"",l.licenza?"Sì":"",l.scoreReason||"",
         l.status||"",l.platform||"",l.src||""];
     });
     var ws = XLSX.utils.aoa_to_sheet([h].concat(rows));
@@ -1331,30 +1256,30 @@ function ResultsView(props) {
       var ws2 = XLSX.utils.aoa_to_sheet([h].concat(highLeads.map(function(l) {
         return [l.score+"%",l.priority,l.name,l.type,l.location,
           l.whatsapp||"",l.phone||"",l.email||"",l.website||"",
-          l.price||"",l.rating||"",l.reviews||"",l.scoreReason||"",
+          l.price||"",l.rating||"",l.reviews||"",l.licenza?"Sì":"",l.scoreReason||"",
           l.status||"",l.platform||"",l.src||""];
       })));
       ws2["!cols"]=ws["!cols"];
       XLSX.utils.book_append_sheet(wb,ws2,"HIGH Priority");
     }
-    XLSX.writeFile(wb,"LuXy_"+new Date().toISOString().slice(0,10)+".xlsx");
+    XLSX.writeFile(wb,"PropertyScout_"+new Date().toISOString().slice(0,10)+".xlsx");
   }
 
   return (
     <div style={{marginTop:8,width:"100%"}}>
-      {/* Stats */}
       <div className="lx-stats" style={{display:"flex",gap:8,marginBottom:12,flexWrap:"wrap",alignItems:"center"}}>
         {[
-          {l:"Lead",      v:leads.length, c:"#9CA3AF"},
+          {l:"Lead",      v:leads.length, c:"#94A3B8"},
           {l:"HIGH",      v:high,         c:"#34D399"},
-          {l:"WhatsApp",  v:hasWA,        c:"#34D399"},
+          {l:"WhatsApp",  v:hasWA,        c:"#25D366"},
           {l:"Email",     v:hasEM,        c:"#60A5FA"},
+          {l:"Licenza",   v:hasLic,       c:"#F59E0B"},
         ].map(function(st,i){
           return (
             <div key={i} className="lx-stat" style={{padding:"6px 12px",borderRadius:10,
-              background:"rgba(255,255,255,0.03)",border:"1px solid rgba(255,255,255,0.08)",textAlign:"center"}}>
+              background:"rgba(255,255,255,0.03)",border:"1px solid rgba(255,255,255,0.07)",textAlign:"center"}}>
               <div className="lx-stat-num" style={{fontSize:20,fontWeight:800,color:st.c}}>{st.v}</div>
-              <div style={{fontSize:9,color:"#4B5563",textTransform:"uppercase",letterSpacing:"0.06em"}}>{st.l}</div>
+              <div style={{fontSize:9,color:"#475569",textTransform:"uppercase",letterSpacing:"0.06em"}}>{st.l}</div>
             </div>
           );
         })}
@@ -1366,17 +1291,16 @@ function ResultsView(props) {
         </button>
       </div>
 
-      {/* Filters */}
       <div className="lx-filters" style={{display:"flex",gap:7,marginBottom:12,flexWrap:"wrap"}}>
         <input value={search} onChange={function(e){setSearch(e.target.value);}}
           placeholder="Cerca per nome o location..."
           style={{flex:1,minWidth:140,padding:"6px 12px",borderRadius:8,
-            background:"rgba(255,255,255,0.05)",border:"1px solid rgba(255,255,255,0.1)",
-            color:"#F9FAFB",fontSize:12,outline:"none"}}/>
+            background:"rgba(255,255,255,0.05)",border:"1px solid rgba(255,255,255,0.08)",
+            color:"#F1F5F9",fontSize:12,outline:"none"}}/>
         <select value={filter} onChange={function(e){setFilter(e.target.value);}}
           style={{fontSize:11,padding:"6px 10px",borderRadius:8,
-            background:"rgba(255,255,255,0.05)",border:"1px solid rgba(255,255,255,0.1)",
-            color:"#9CA3AF",cursor:"pointer"}}>
+            background:"rgba(255,255,255,0.05)",border:"1px solid rgba(255,255,255,0.08)",
+            color:"#94A3B8",cursor:"pointer"}}>
           <option value="all">Tutti gli status</option>
           {Object.keys(STATUS_LABELS).map(function(k){
             return <option key={k} value={k}>{STATUS_LABELS[k]}</option>;
@@ -1384,15 +1308,14 @@ function ResultsView(props) {
         </select>
         <select value={sort} onChange={function(e){setSort(e.target.value);}}
           style={{fontSize:11,padding:"6px 10px",borderRadius:8,
-            background:"rgba(255,255,255,0.05)",border:"1px solid rgba(255,255,255,0.1)",
-            color:"#9CA3AF",cursor:"pointer"}}>
+            background:"rgba(255,255,255,0.05)",border:"1px solid rgba(255,255,255,0.08)",
+            color:"#94A3B8",cursor:"pointer"}}>
           <option value="score">Score</option>
           <option value="priority">Priorità</option>
           <option value="name">Nome</option>
         </select>
       </div>
 
-      {/* Cards */}
       {filtered.map(function(lead) {
         return <LeadCard key={lead.id} lead={lead} onStatus={onStatus}/>;
       })}
@@ -1409,15 +1332,15 @@ function LogPanel(props) {
   var logs = props.logs||[];
   return (
     <div style={{position:"fixed",bottom:20,right:16,width:340,maxHeight:260,
-      background:"#0A0F1E",border:"1px solid rgba(236,72,153,0.3)",borderRadius:12,
+      background:"#0A0F1E",border:"1px solid rgba(99,102,241,0.3)",borderRadius:12,
       zIndex:150,display:"flex",flexDirection:"column",boxShadow:"0 8px 32px rgba(0,0,0,0.6)"}}>
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",
-        padding:"8px 12px",borderBottom:"1px solid rgba(255,255,255,0.06)"}}>
-        <span style={{fontSize:11,fontWeight:700,color:"#EC4899",textTransform:"uppercase",
-          letterSpacing:"0.1em"}}>Log</span>
+        padding:"8px 12px",borderBottom:"1px solid rgba(255,255,255,0.05)"}}>
+        <span style={{fontSize:11,fontWeight:700,color:"#818CF8",textTransform:"uppercase",
+          letterSpacing:"0.1em"}}>Log ricerca</span>
         <button onClick={props.onClose}
           style={{fontSize:12,width:20,height:20,borderRadius:5,border:"none",
-            background:"rgba(255,255,255,0.1)",color:"#9CA3AF",cursor:"pointer"}}>×</button>
+            background:"rgba(255,255,255,0.08)",color:"#94A3B8",cursor:"pointer"}}>×</button>
       </div>
       <div style={{overflowY:"auto",flex:1,padding:"4px 0"}}>
         {!logs.length&&<div style={{padding:"10px 12px",fontSize:11,color:"#4B5563",textAlign:"center"}}>
@@ -1446,69 +1369,71 @@ function SettingsModal(props) {
   var fields = [
     {
       label:"Apify Token",
-      desc:"apify.com → Settings → Integrations — per Instagram, Facebook, Immobiliare.it",
+      desc:"apify.com → Settings → Integrations — per Instagram, Facebook, Immobiliare.it, Subito",
       link:"https://console.apify.com/account/integrations",
       val:apify, set:setApify,
     },
     {
       label:"Serper.dev API Key",
-      desc:"serper.dev → 2.500 ricerche gratuite — per Google Maps",
+      desc:"serper.dev → 2.500 ricerche gratuite — per Google Maps + Gruppi FB + Telegram",
       link:"https://serper.dev/api-key",
       val:serper, set:setSerper,
     },
   ];
 
   return (
-    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.88)",backdropFilter:"blur(8px)",
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.9)",backdropFilter:"blur(8px)",
       zIndex:200,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
-      <div style={{background:"#0F172A",border:"1px solid rgba(236,72,153,0.3)",
-        borderRadius:16,padding:28,maxWidth:480,width:"100%"}}>
-        <div style={{fontSize:16,fontWeight:800,fontFamily:"Georgia,serif",marginBottom:4}}>
-          Lu<span style={{color:"#EC4899"}}>X</span>y — Configura API
+      <div style={{background:"#0F1629",border:"1px solid rgba(99,102,241,0.3)",
+        borderRadius:18,padding:28,maxWidth:480,width:"100%",
+        boxShadow:"0 24px 64px rgba(0,0,0,0.7), 0 0 0 1px rgba(99,102,241,0.1)"}}>
+        <div style={{fontSize:16,fontWeight:800,marginBottom:4,display:"flex",alignItems:"center",gap:8}}>
+          <span style={{fontSize:20}}>🏠</span>
+          <span>Property<span style={{color:"#F59E0B"}}>Scout</span> — Configura API</span>
         </div>
-        <div style={{fontSize:11,color:"#4B5563",marginBottom:18}}>
+        <div style={{fontSize:11,color:"#475569",marginBottom:20}}>
           Solo dati reali — zero risultati inventati
         </div>
 
         {fields.map(function(f,i){
           return (
-            <div key={i} style={{marginBottom:16}}>
-              <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:3}}>
+            <div key={i} style={{marginBottom:18}}>
+              <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}>
                 <span style={{fontSize:11,fontWeight:700,color:"#CBD5E1"}}>{f.label}</span>
                 {f.val&&f.val.length>10&&<span style={{fontSize:10,color:"#34D399"}}>✓ attiva</span>}
               </div>
-              <div style={{fontSize:10,color:"#4B5563",marginBottom:6}}>
+              <div style={{fontSize:10,color:"#475569",marginBottom:6}}>
                 {f.desc} — <a href={f.link} target="_blank" rel="noopener noreferrer"
-                  style={{color:"#60A5FA",textDecoration:"none"}}>{f.link.replace("https://","")}</a>
+                  style={{color:"#818CF8",textDecoration:"none"}}>{f.link.replace("https://","")}</a>
               </div>
               <input value={f.val} onChange={function(e){f.set(e.target.value);}} type="password"
                 placeholder="Incolla la tua API key..."
-                style={{width:"100%",background:"rgba(255,255,255,0.05)",
-                  border:"1px solid rgba(255,255,255,0.12)",borderRadius:8,
-                  padding:"9px 12px",color:"#F9FAFB",fontSize:12,fontFamily:"monospace",outline:"none"}}/>
+                style={{width:"100%",background:"rgba(255,255,255,0.04)",
+                  border:"1px solid rgba(99,102,241,0.2)",borderRadius:8,
+                  padding:"9px 12px",color:"#F1F5F9",fontSize:12,fontFamily:"monospace",outline:"none"}}/>
             </div>
           );
         })}
 
-        <div style={{padding:"10px 14px",background:"rgba(255,255,255,0.02)",borderRadius:10,
-          border:"1px solid rgba(255,255,255,0.07)",marginBottom:16,fontSize:11,color:"#6B7280",lineHeight:1.8}}>
-          <strong style={{color:"#F9FAFB"}}>💡 Tip:</strong> Aggiungi le key su Vercel<br/>
-          <span style={{fontSize:10,color:"#4B5563"}}>Settings → Environment Variables → APIFY_TOKEN + SERPER_API_KEY</span><br/>
-          <span style={{fontSize:10,color:"#4B5563"}}>Le key verranno caricate automaticamente ad ogni deploy</span><br/><br/>
-          <strong style={{color:"#F9FAFB"}}>Con Serper key:</strong> Google Maps<br/>
-          <strong style={{color:"#F9FAFB"}}>Con Apify key:</strong> Instagram · Facebook · Subito · Immobiliare · VRBO
+        <div style={{padding:"10px 14px",background:"rgba(99,102,241,0.05)",borderRadius:10,
+          border:"1px solid rgba(99,102,241,0.12)",marginBottom:18,fontSize:11,color:"#64748B",lineHeight:1.9}}>
+          <strong style={{color:"#E2E8F0"}}>💡 Tip:</strong> Aggiungi le key su Vercel<br/>
+          <span style={{fontSize:10,color:"#475569"}}>Settings → Environment Variables → APIFY_TOKEN + SERPER_API_KEY</span><br/><br/>
+          <strong style={{color:"#E2E8F0"}}>Con Serper:</strong> Google Maps · Gruppi Facebook · Telegram annunci<br/>
+          <strong style={{color:"#E2E8F0"}}>Con Apify:</strong> Instagram · Facebook Pagine · Subito · Immobiliare · VRBO
         </div>
 
         <div style={{display:"flex",gap:8}}>
           <button onClick={function(){props.onSave({apify:apify,serper:serper});}}
-            style={{flex:1,padding:"11px",borderRadius:8,border:"none",
-              background:"linear-gradient(135deg,#9D174D,#EC4899)",
-              color:"#fff",fontSize:13,fontWeight:700,cursor:"pointer"}}>
+            style={{flex:1,padding:"11px",borderRadius:9,border:"none",
+              background:"linear-gradient(135deg,#3730A3,#6366F1)",
+              color:"#fff",fontSize:13,fontWeight:700,cursor:"pointer",
+              boxShadow:"0 4px 16px rgba(99,102,241,0.35)"}}>
             Salva
           </button>
           <button onClick={props.onClose}
-            style={{padding:"11px 16px",borderRadius:8,border:"1px solid rgba(255,255,255,0.1)",
-              background:"transparent",color:"#6B7280",fontSize:13,cursor:"pointer"}}>
+            style={{padding:"11px 16px",borderRadius:9,border:"1px solid rgba(255,255,255,0.08)",
+              background:"transparent",color:"#64748B",fontSize:13,cursor:"pointer"}}>
             Chiudi
           </button>
         </div>
@@ -1533,41 +1458,44 @@ export default function App() {
   var inpRef = useRef(null);
 
   useEffect(function() {
-    // Step 1: Load from Vercel env vars via /api/config (server-side, always fresh)
     if (IS_VERCEL) {
       fetch("/api/config").then(function(r){ return r.ok ? r.json() : null; }).then(function(cfg) {
         if (cfg && cfg.keys && (cfg.keys.apify || cfg.keys.serper)) {
-          // Env vars are set — use them and save to storage for offline use
           var fromEnv = { apify: cfg.keys.apify||"", serper: cfg.keys.serper||"" };
           setApiKeys(fromEnv);
-          storage.set("luxy:keys", JSON.stringify(fromEnv)).catch(function(){});
-          return; // skip localStorage lookup
+          storage.set("ps:keys", JSON.stringify(fromEnv)).catch(function(){});
+          return;
         }
-        // Env vars not set — fall through to localStorage
         loadKeysFromStorage();
       }).catch(function(){ loadKeysFromStorage(); });
     } else {
       loadKeysFromStorage();
     }
 
-    storage.get("luxy:leads").then(function(r) {
+    storage.get("ps:leads").then(function(r) {
       if (r&&r.value) { try { setAllLeads(JSON.parse(r.value)); } catch(e){} }
+      else {
+        // migrate from old key
+        storage.get("luxy:leads").then(function(r2) {
+          if (r2&&r2.value) { try { setAllLeads(JSON.parse(r2.value)); } catch(e){} }
+        }).catch(function(){});
+      }
     }).catch(function(){});
   },[]);
 
   function loadKeysFromStorage() {
-    storage.get("luxy:keys").then(function(r) {
+    storage.get("ps:keys").then(function(r) {
       if (r&&r.value) {
         try { setApiKeys(JSON.parse(r.value)); return; } catch(e){}
       }
-      // Migration: try old storage key name
-      return storage.get("luxy:api_keys").then(function(r2) {
+      // migrate from old storage key
+      return storage.get("luxy:keys").then(function(r2) {
         if (r2&&r2.value) {
           try {
             var old2 = JSON.parse(r2.value);
             var migrated = { apify: old2.apify||"", serper: old2.serper||"" };
             setApiKeys(migrated);
-            storage.set("luxy:keys", JSON.stringify(migrated)).catch(function(){});
+            storage.set("ps:keys", JSON.stringify(migrated)).catch(function(){});
           } catch(e){}
         }
       });
@@ -1593,7 +1521,7 @@ export default function App() {
 
   async function saveKeys(keys) {
     setApiKeys(keys);
-    try { await storage.set("luxy:keys",JSON.stringify(keys)); } catch(e){}
+    try { await storage.set("ps:keys",JSON.stringify(keys)); } catch(e){}
     setShowSettings(false);
   }
 
@@ -1602,7 +1530,7 @@ export default function App() {
       var updated = prev.map(function(l) {
         return l.id===id ? Object.assign({},l,{status:status}) : l;
       });
-      storage.set("luxy:leads",JSON.stringify(updated)).catch(function(){});
+      storage.set("ps:leads",JSON.stringify(updated)).catch(function(){});
       return updated;
     });
   }
@@ -1614,10 +1542,9 @@ export default function App() {
     pushMsg("user", text);
     setBusy(true);
     setLogs([]);
-    addLog("info", "Parsing richiesta...");
+    addLog("info", "Analisi richiesta...");
 
     try {
-      // 1. Parse NLP
       var req = null;
       try {
         var raw = await callClaude(text, NLP_PROMPT);
@@ -1629,6 +1556,7 @@ export default function App() {
           if (req.roomType)    parts.push("tipo="+req.roomType);
           if (req.budgetMax)   parts.push("budget="+req.budgetMax);
           if (req.durationType) parts.push(req.durationType);
+          if (req.licenza)     parts.push("con licenza");
           addLog("success","Filtri: "+parts.join(" | "));
         }
       } catch(e) {
@@ -1636,9 +1564,8 @@ export default function App() {
       }
 
       var dest = (req&&req.destination) ? req.destination : text.split(/[\s,]+/)[0];
-      addLog("info","Ricerca: "+dest+" ("+searchMode+")");
+      addLog("info","Ricerca proprietari: "+dest+" ("+searchMode+")");
 
-      // 2. Run search
       var leads = await runSearch(dest, searchMode, req, apiKeys, function(label, status) {
         if (status==="loading") addLog("info", label+" → avviato");
         else if (status.startsWith("done:")) addLog("success", label+" → "+status.replace("done:","")+". risultati");
@@ -1647,19 +1574,19 @@ export default function App() {
 
       setBusy(false);
 
-      // 3. Save + show
       setAllLeads(function(prev) {
         var merged = leads.concat(prev.filter(function(p) {
           return !leads.find(function(l){return l.id===p.id;});
         }));
-        storage.set("luxy:leads",JSON.stringify(merged)).catch(function(){});
+        storage.set("ps:leads",JSON.stringify(merged)).catch(function(){});
         return merged;
       });
 
       var high = leads.filter(function(l){return l.priority==="HIGH";}).length;
       var wa   = leads.filter(function(l){return l.whatsapp;}).length;
+      var lic  = leads.filter(function(l){return l.licenza;}).length;
       pushMsg("assistant",
-        "Trovati "+leads.length+" lead per "+dest+" — "+high+" HIGH priority · "+wa+" con WhatsApp",
+        "Trovati "+leads.length+" proprietari per "+dest+" — "+high+" HIGH priority · "+wa+" con WhatsApp"+(lic?" · "+lic+" con licenza":""),
         leads
       );
 
@@ -1675,28 +1602,33 @@ export default function App() {
   }
 
   var SUGGESTIONS = [
-    "Ibiza appartamento intero luglio agosto budget 3000 settimana",
-    "Sardegna villa privata 6 persone agosto 2026",
-    "Mykonos stanza condivisa stagionale maggio-settembre budget 800 mese",
-    "Bali villa intera annuale 2 persone budget 2000 mese",
-    "Puglia B&B boutique collaborazione",
-    "Ibiza","Mykonos","Sardegna","Bali",
+    "Appartamenti Roma - trova proprietari privati con licenza",
+    "Milano affitti brevi - proprietari diretti luglio agosto",
+    "Ibiza villa luglio agosto budget 3000 settimana",
+    "Sardegna casa vacanze agosto 2026 privato",
+    "Mykonos villa stagionale maggio-settembre",
+    "Roma","Milano","Firenze","Napoli",
   ];
 
-  var hasKeys = IS_VERCEL || apiKeys.apify || apiKeys.serper; // Vercel env vars count as active
+  var hasKeys = IS_VERCEL || apiKeys.apify || apiKeys.serper;
   var hasErrors = logs.some(function(l){return l.level==="error";});
   var lastMsg = msgs.filter(function(m){return m.leads;}).pop()||null;
 
   return (
     <div style={{height:"100vh",display:"flex",flexDirection:"column",
-      background:"#09090B",color:"#F9FAFB",fontFamily:"Inter,system-ui,sans-serif"}}>
+      background:"#09090B",color:"#F1F5F9",fontFamily:"Inter,system-ui,sans-serif"}}>
       <style dangerouslySetInnerHTML={{__html:
         "@keyframes bounce{0%,80%,100%{transform:translateY(0)}40%{transform:translateY(-7px)}} " +
-        "@keyframes fadeUp{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}} " +
-        "html,body,#root{margin:0;padding:0;border:0;background:#09090B;} " +
+        "@keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}} " +
+        "@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.6}} " +
+        "html,body,#root{margin:0;padding:0;border:0;} " +
+        "body{background:radial-gradient(ellipse at 60% -10%, #1a1535 0%, #09090B 55%) fixed;} " +
         "textarea:focus,input:focus,select:focus{outline:none} " +
-        "::-webkit-scrollbar{width:3px} ::-webkit-scrollbar-thumb{background:#BE185D;border-radius:2px} " +
+        "::-webkit-scrollbar{width:3px} ::-webkit-scrollbar-thumb{background:#4338CA;border-radius:2px} " +
         "*{box-sizing:border-box} " +
+        ".ps-lead-card:hover{transform:translateY(-1px);box-shadow:0 4px 24px rgba(99,102,241,0.1);} " +
+        ".ps-mode-btn{transition:all 0.15s ease;} " +
+        ".ps-suggestion-btn:hover{background:rgba(99,102,241,0.08) !important;border-color:rgba(99,102,241,0.2) !important;color:#C7D2FE !important;} " +
         "@media(max-width:640px){" +
           ".lx-header{padding:8px 12px !important;}" +
           ".lx-modes{padding:5px 10px !important;}" +
@@ -1707,10 +1639,9 @@ export default function App() {
           ".lx-sub{display:none !important;}" +
           ".lx-btn-text{display:none !important;}" +
           ".lx-card-name{font-size:13px !important;}" +
-          ".lx-card-row{flex-direction:column !important;gap:6px !important;}" +
           ".lx-stats{gap:5px !important;}" +
-          ".lx-stat{min-width:60px !important;padding:5px 8px !important;}" +
-          ".lx-stat-num{font-size:16px !important;}" +
+          ".lx-stat{min-width:55px !important;padding:5px 7px !important;}" +
+          ".lx-stat-num{font-size:15px !important;}" +
           ".lx-filters{flex-wrap:wrap !important;}" +
           ".lx-msg-grid{grid-template-columns:1fr !important;}" +
         "}"
@@ -1720,36 +1651,38 @@ export default function App() {
       {showLog&&<LogPanel logs={logs} onClose={function(){setShowLog(false);}}/>}
 
       {/* HEADER */}
-      <div className="lx-header" style={{borderBottom:"1px solid rgba(236,72,153,0.15)",
-        padding:"10px 12px",display:"flex",alignItems:"center",gap:8,background:"#09090B",
+      <div className="lx-header" style={{borderBottom:"1px solid rgba(99,102,241,0.15)",
+        padding:"10px 14px",display:"flex",alignItems:"center",gap:10,
+        background:"rgba(9,9,11,0.95)",backdropFilter:"blur(12px)",
         position:"sticky",top:0,zIndex:100,flexShrink:0}}>
-        <div className="lx-logo" style={{width:32,height:32,borderRadius:8,background:"#000",
-          border:"1.5px solid rgba(236,72,153,0.45)",display:"flex",alignItems:"center",
-          justifyContent:"center",flexShrink:0,boxShadow:"0 0 12px rgba(236,72,153,0.18)"}}>
-          <span style={{fontSize:11,fontWeight:900,fontFamily:"Georgia,serif",color:"#fff"}}>
-            Lu<span style={{color:"#EC4899"}}>X</span>y
+        <div className="lx-logo" style={{width:34,height:34,borderRadius:9,
+          background:"linear-gradient(135deg,#1E1B4B,#312E81)",
+          border:"1.5px solid rgba(99,102,241,0.4)",display:"flex",alignItems:"center",
+          justifyContent:"center",flexShrink:0,boxShadow:"0 0 16px rgba(99,102,241,0.2)"}}>
+          <span style={{fontSize:13,fontWeight:900,letterSpacing:"-0.5px",color:"#fff"}}>
+            P<span style={{color:"#F59E0B"}}>S</span>
           </span>
         </div>
         <div style={{minWidth:0}}>
-          <div className="lx-title" style={{fontSize:14,fontWeight:800,fontFamily:"Georgia,serif",whiteSpace:"nowrap"}}>
-            Lu<span style={{color:"#EC4899"}}>X</span>y <span style={{color:"#4B5563",fontWeight:300}}>Club</span>
+          <div className="lx-title" style={{fontSize:15,fontWeight:800,letterSpacing:"-0.3px",whiteSpace:"nowrap"}}>
+            Property<span style={{color:"#F59E0B"}}>Scout</span>
           </div>
-          <div className="lx-sub" style={{fontSize:9,color:"#374151",textTransform:"uppercase",letterSpacing:"0.1em"}}>
-            AI Partner Discovery
+          <div className="lx-sub" style={{fontSize:9,color:"#475569",textTransform:"uppercase",letterSpacing:"0.12em"}}>
+            Owner Discovery Platform
           </div>
         </div>
         <div style={{marginLeft:"auto",display:"flex",gap:5,alignItems:"center",flexShrink:0}}>
           <button onClick={function(){setShowLog(function(o){return !o;});}}
-            style={{fontSize:10,padding:"4px 8px",borderRadius:20,cursor:"pointer",fontWeight:700,
-              background:hasErrors?"rgba(248,113,113,0.15)":"rgba(255,255,255,0.06)",
-              border:"1px solid "+(hasErrors?"rgba(248,113,113,0.4)":"rgba(255,255,255,0.12)"),
-              color:hasErrors?"#F87171":"#6B7280"}}>
-            {showLog?"✕":"🔍"}<span className="lx-btn-text">{logs.length>0?" ("+logs.length+")":""}</span>
+            style={{fontSize:10,padding:"4px 9px",borderRadius:20,cursor:"pointer",fontWeight:700,
+              background:hasErrors?"rgba(248,113,113,0.12)":"rgba(255,255,255,0.05)",
+              border:"1px solid "+(hasErrors?"rgba(248,113,113,0.35)":"rgba(255,255,255,0.1)"),
+              color:hasErrors?"#F87171":"#64748B"}}>
+            {showLog?"✕":"📊"}<span className="lx-btn-text">{logs.length>0?" ("+logs.length+")":""}</span>
           </button>
           <button onClick={function(){setShowSettings(true);}}
-            style={{fontSize:10,padding:"4px 10px",borderRadius:20,cursor:"pointer",fontWeight:600,
-              background:hasKeys?"rgba(52,211,153,0.12)":"rgba(251,191,36,0.12)",
-              border:"1px solid "+(hasKeys?"rgba(52,211,153,0.35)":"rgba(251,191,36,0.35)"),
+            style={{fontSize:10,padding:"4px 11px",borderRadius:20,cursor:"pointer",fontWeight:600,
+              background:hasKeys?"rgba(52,211,153,0.1)":"rgba(251,191,36,0.1)",
+              border:"1px solid "+(hasKeys?"rgba(52,211,153,0.3)":"rgba(251,191,36,0.3)"),
               color:hasKeys?"#34D399":"#F59E0B"}}>
             {hasKeys?"⚙":"⚠"}<span className="lx-btn-text"> {hasKeys?"API":"Configura"}</span>
           </button>
@@ -1757,17 +1690,18 @@ export default function App() {
       </div>
 
       {/* MODE SELECTOR */}
-      <div className="lx-modes" style={{padding:"6px 12px",borderBottom:"1px solid rgba(255,255,255,0.05)",
-        background:"#0A0A0F",flexShrink:0,overflowX:"auto"}}>
+      <div className="lx-modes" style={{padding:"6px 14px",borderBottom:"1px solid rgba(255,255,255,0.04)",
+        background:"rgba(9,9,11,0.8)",flexShrink:0,overflowX:"auto"}}>
         <div style={{display:"flex",gap:4,maxWidth:720,margin:"0 auto",width:"max-content",minWidth:"100%"}}>
           {SEARCH_MODES.map(function(m) {
             var isA = searchMode===m.id;
             return (
               <button key={m.id} onClick={function(){setSearchMode(m.id);}}
-                style={{fontSize:11,padding:"5px 10px",borderRadius:8,whiteSpace:"nowrap",
-                  border:"1px solid "+(isA?"rgba(236,72,153,0.5)":"rgba(255,255,255,0.07)"),
-                  background:isA?"rgba(236,72,153,0.14)":"transparent",
-                  color:isA?"#F472B6":"#6B7280",cursor:"pointer",fontWeight:isA?700:400}}>
+                className="ps-mode-btn"
+                style={{fontSize:11,padding:"5px 11px",borderRadius:8,whiteSpace:"nowrap",
+                  border:"1px solid "+(isA?"rgba(99,102,241,0.5)":"rgba(255,255,255,0.06)"),
+                  background:isA?"rgba(99,102,241,0.15)":"transparent",
+                  color:isA?"#A5B4FC":"#64748B",cursor:"pointer",fontWeight:isA?700:400}}>
                 {m.label}
               </button>
             );
@@ -1776,37 +1710,61 @@ export default function App() {
       </div>
 
       {/* MESSAGES */}
-      <div className="lx-messages" style={{flex:1,overflowY:"auto",padding:"14px 12px"}}>
+      <div className="lx-messages" style={{flex:1,overflowY:"auto",padding:"16px 14px"}}>
         <div style={{maxWidth:720,margin:"0 auto"}}>
 
           {/* Empty state */}
           {!msgs.length&&(
-            <div style={{animation:"fadeUp 0.4s ease"}}>
-              <div style={{textAlign:"center",padding:"16px 0 12px"}}>
-                <div style={{width:62,height:62,borderRadius:14,background:"#000",
-                  border:"2px solid rgba(236,72,153,0.3)",display:"flex",alignItems:"center",
-                  justifyContent:"center",margin:"0 auto 12px",boxShadow:"0 0 28px rgba(236,72,153,0.1)"}}>
-                  <span style={{fontSize:20,fontWeight:900,fontFamily:"Georgia,serif"}}>
-                    L<span style={{color:"#EC4899"}}>X</span>
+            <div style={{animation:"fadeUp 0.5s ease"}}>
+              <div style={{textAlign:"center",padding:"20px 0 16px"}}>
+
+                {/* Hero logo */}
+                <div style={{width:72,height:72,borderRadius:18,
+                  background:"linear-gradient(135deg,#1E1B4B 0%,#312E81 60%,#3730A3 100%)",
+                  border:"2px solid rgba(99,102,241,0.35)",
+                  display:"flex",alignItems:"center",justifyContent:"center",
+                  margin:"0 auto 14px",
+                  boxShadow:"0 0 48px rgba(99,102,241,0.2), 0 16px 32px rgba(0,0,0,0.4)"}}>
+                  <span style={{fontSize:26,fontWeight:900,letterSpacing:"-1px",color:"#fff"}}>
+                    P<span style={{color:"#F59E0B"}}>S</span>
                   </span>
                 </div>
-                <div style={{fontSize:18,fontWeight:700,fontFamily:"Georgia,serif",marginBottom:8}}>
-                  LuXy Club — Partner Discovery
+
+                <div style={{fontSize:22,fontWeight:800,letterSpacing:"-0.5px",marginBottom:6}}>
+                  Property<span style={{color:"#F59E0B"}}>Scout</span>
                 </div>
-                <div style={{fontSize:13,color:"#4B5563",lineHeight:1.9,maxWidth:440,margin:"0 auto"}}>
-                  Descrivi la struttura che cerchi in linguaggio libero<br/>
-                  I filtri vengono estratti automaticamente
+                <div style={{fontSize:13,color:"#475569",lineHeight:2,maxWidth:420,margin:"0 auto 4px"}}>
+                  Trova proprietari di appartamenti reali con cui collaborare<br/>
+                  <span style={{fontSize:11,color:"#374151"}}>Ricerca su 9 canali · AI scoring · Contatti diretti</span>
+                </div>
+
+                {/* Channel pills */}
+                <div style={{display:"flex",flexWrap:"wrap",gap:5,justifyContent:"center",marginTop:10,marginBottom:20}}>
+                  {[
+                    {l:"Google Maps",c:"#4285F4"},{l:"Facebook Gruppi",c:"#1877F2"},
+                    {l:"Telegram",c:"#26A5E4"},{l:"Immobiliare.it",c:"#0E4CB2"},
+                    {l:"Subito.it",c:"#CC0000"},{l:"Airbnb",c:"#FF5A5F"},
+                    {l:"Instagram",c:"#E1306C"},{l:"VRBO",c:"#2196F3"},
+                    {l:"MediaVacanze",c:"#FF6B35"},
+                  ].map(function(ch,i){
+                    return <span key={i} style={{fontSize:10,padding:"3px 10px",borderRadius:20,
+                      background:ch.c+"12",border:"1px solid "+ch.c+"30",color:ch.c,fontWeight:600}}>
+                      {ch.l}
+                    </span>;
+                  })}
                 </div>
               </div>
 
-              <div style={{display:"flex",flexDirection:"column",gap:7,maxWidth:640,margin:"0 auto"}}>
+              <div style={{display:"flex",flexDirection:"column",gap:6,maxWidth:640,margin:"0 auto"}}>
                 {SUGGESTIONS.map(function(s,i) {
                   return (
                     <button key={i} onClick={function(){setInput(s);if(inpRef.current)inpRef.current.focus();}}
-                      style={{textAlign:"left",padding:"12px 16px",borderRadius:10,
-                        background:"rgba(236,72,153,0.04)",border:"1px solid rgba(236,72,153,0.1)",
-                        color:"#6B7280",fontSize:13,cursor:"pointer",display:"flex",alignItems:"center",gap:8}}>
-                      <span style={{color:"#EC4899",flexShrink:0}}>✦</span>{s}
+                      className="ps-suggestion-btn"
+                      style={{textAlign:"left",padding:"11px 16px",borderRadius:10,
+                        background:"rgba(255,255,255,0.025)",border:"1px solid rgba(255,255,255,0.06)",
+                        color:"#64748B",fontSize:13,cursor:"pointer",display:"flex",alignItems:"center",gap:8,
+                        transition:"all 0.15s ease"}}>
+                      <span style={{color:"#6366F1",flexShrink:0,fontSize:10}}>▸</span>{s}
                     </button>
                   );
                 })}
@@ -1824,17 +1782,18 @@ export default function App() {
                 {m.role==="user" ? (
                   <div style={{maxWidth:"80%",padding:"9px 14px",
                     borderRadius:"13px 13px 4px 13px",
-                    background:"linear-gradient(135deg,#9D174D,#EC4899)",
-                    fontSize:13,color:"#fff",lineHeight:1.5}}>
+                    background:"linear-gradient(135deg,#3730A3,#6366F1)",
+                    fontSize:13,color:"#fff",lineHeight:1.5,
+                    boxShadow:"0 4px 16px rgba(99,102,241,0.25)"}}>
                     {m.content}
                   </div>
                 ) : (
                   <div style={{width:"100%"}}>
                     <div style={{display:"inline-block",padding:"9px 13px",
                       borderRadius:"4px 13px 13px 13px",
-                      background:"rgba(255,255,255,0.04)",
-                      border:"1px solid rgba(236,72,153,0.12)",
-                      fontSize:13,color:"#D1D5DB",lineHeight:1.5,maxWidth:"100%"}}>
+                      background:"rgba(255,255,255,0.03)",
+                      border:"1px solid rgba(99,102,241,0.12)",
+                      fontSize:13,color:"#CBD5E1",lineHeight:1.5,maxWidth:"100%"}}>
                       {m.content}
                     </div>
                     {isLast&&parsedReq&&<FilterBadges req={parsedReq}/>}
@@ -1854,18 +1813,18 @@ export default function App() {
 
           {/* Loading */}
           {busy&&(
-            <div style={{padding:"12px 14px",borderRadius:"4px 13px 13px 13px",
-              background:"rgba(255,255,255,0.04)",border:"1px solid rgba(236,72,153,0.12)",
+            <div style={{padding:"12px 16px",borderRadius:"4px 13px 13px 13px",
+              background:"rgba(255,255,255,0.03)",border:"1px solid rgba(99,102,241,0.15)",
               display:"inline-block",animation:"fadeUp 0.2s ease"}}>
               <div style={{display:"flex",alignItems:"center",gap:10}}>
                 <div style={{display:"flex",gap:4}}>
                   {[0,1,2].map(function(i) {
                     return <div key={i} style={{width:6,height:6,borderRadius:"50%",
-                      background:"#EC4899",
+                      background:"#6366F1",
                       animation:"bounce 1.2s ease-in-out "+(i*0.2)+"s infinite"}}/>;
                   })}
                 </div>
-                <span style={{fontSize:12,color:"#6B7280"}}>Ricerca in corso...</span>
+                <span style={{fontSize:12,color:"#64748B"}}>Scansione proprietari in corso...</span>
               </div>
             </div>
           )}
@@ -1875,28 +1834,33 @@ export default function App() {
       </div>
 
       {/* INPUT */}
-      <div className="lx-input" style={{borderTop:"1px solid rgba(236,72,153,0.12)",
-        padding:"9px 10px 12px",background:"#09090B",flexShrink:0}}>
+      <div className="lx-input" style={{borderTop:"1px solid rgba(99,102,241,0.1)",
+        padding:"10px 12px 13px",background:"rgba(9,9,11,0.95)",backdropFilter:"blur(12px)",flexShrink:0}}>
         <div style={{maxWidth:720,margin:"0 auto",display:"flex",gap:6,alignItems:"flex-end"}}>
           <textarea ref={inpRef} value={input}
             onChange={function(e){setInput(e.target.value);}}
             onKeyDown={handleKey}
-            placeholder="Ibiza villa luglio agosto · oppure: Mykonos"
+            placeholder="Es: Roma appartamenti privati con licenza · Ibiza villa luglio agosto · Milano affitti brevi"
             rows={2} disabled={busy}
-            style={{flex:1,background:"rgba(255,255,255,0.05)",
-              border:"1px solid rgba(236,72,153,0.2)",borderRadius:10,
-              padding:"8px 11px",color:"#F9FAFB",fontSize:13,resize:"none",
-              fontFamily:"inherit",lineHeight:1.5,opacity:busy?0.5:1}}/>
+            style={{flex:1,background:"rgba(255,255,255,0.04)",
+              border:"1px solid rgba(99,102,241,0.2)",borderRadius:10,
+              padding:"9px 12px",color:"#F1F5F9",fontSize:13,resize:"none",
+              fontFamily:"inherit",lineHeight:1.5,opacity:busy?0.5:1,
+              transition:"border-color 0.15s ease"}}/>
           <button onClick={send} disabled={busy||!input.trim()}
-            style={{width:40,height:40,borderRadius:10,border:"none",
-              background:busy||!input.trim()?"rgba(236,72,153,0.1)":"linear-gradient(135deg,#9D174D,#EC4899)",
+            style={{width:42,height:42,borderRadius:10,border:"none",
+              background:busy||!input.trim()
+                ?"rgba(99,102,241,0.08)"
+                :"linear-gradient(135deg,#3730A3,#6366F1)",
               color:"#fff",fontSize:17,cursor:busy||!input.trim()?"not-allowed":"pointer",
-              flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
+              flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center",
+              boxShadow:busy||!input.trim()?"none":"0 4px 16px rgba(99,102,241,0.35)",
+              transition:"all 0.15s ease"}}>
             {busy?"⏳":"↑"}
           </button>
         </div>
         <div style={{maxWidth:720,margin:"3px auto 0",fontSize:10,color:"#374151",textAlign:"center"}}>
-          8 canali · Google Maps · Instagram · MediaVacanze · Subito · Idealista · Telegram · Facebook
+          9 canali · Google Maps · FB Gruppi · Telegram · Immobiliare · Subito · Airbnb · Instagram · VRBO · MediaVacanze
         </div>
       </div>
     </div>
